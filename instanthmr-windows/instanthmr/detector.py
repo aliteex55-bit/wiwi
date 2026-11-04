@@ -58,7 +58,13 @@ class RFDETRDetector:
         cls = getattr(rfdetr, self._VARIANTS[variant])
         self._model = cls()
         if optimize_for_inference:
-            self._model.optimize_for_inference()
+            # rfdetr 1.9 renamed optimize_for_inference() to inference() and
+            # 1.11 removed the old name, so look for the new one first. Both
+            # default to a TorchScript trace, which works on every platform.
+            optimize = (getattr(self._model, "inference", None)
+                        or getattr(self._model, "optimize_for_inference", None))
+            if optimize is not None:
+                optimize()
 
         self._confidence = confidence
         self._max_persons = max_persons

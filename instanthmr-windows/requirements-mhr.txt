@@ -1,12 +1,17 @@
-# MHR body mesh rendering — install TOGETHER with requirements.txt
+# MHR body mesh rendering - optional extra on top of requirements.txt
 #
-# IMPORTANT: always install both files in a single pip call so the resolver
-# can pick a torch version compatible with rfdetr, torchvision, AND
-# pymomentum-gpu at once.  Installing them separately causes pip to first
-# choose a torch version for rfdetr and then downgrade it for pymomentum,
-# leaving torchvision broken.
+# pymomentum is a torch C++ extension built against torch 2.8.x, and the
+# Windows wheel of pymomentum-gpu (0.1.112+) declares NO torch requirement,
+# so pip will not stop a mismatch (it segfaults at import instead of
+# raising). install.py therefore pins torch==2.8.0 everywhere, and
+# download_mhr_assets.bat installs this file with the installed torch and
+# torchvision written to a pip constraints file (-c) so they cannot change:
 #
-#   pip install -r requirements.txt -r requirements-mhr.txt
+#   pip freeze | grep -E '^torch(vision)?==' > pins.txt
+#   pip install -r requirements-mhr.txt -c pins.txt
+#
+# (Upstream's advice was one pip call with both requirement files, which
+# relied on pymomentum pulling the torch it needs; see above.)
 #
 # Prerequisites
 # -------------
@@ -24,8 +29,9 @@
 #   python demo.py --image photo.jpg --mhr-assets models/mhr_assets
 
 # pymomentum — Meta's momentum geometry library (C++ Python bindings).
-# This package brings its own torch constraint; do NOT add a separate
-# torch>=X line here or pip will resolve torch twice and downgrade it.
+# Only pymomentum-cpu still declares its torch constraint (torch>=2.8,<2.9);
+# pymomentum-gpu's Windows wheel declares none. Do NOT add a torch line here:
+# torch is pinned by install.py / the constraints file described above.
 #
 # WARNING: "pip install pymomentum" installs an UNRELATED legacy SMS library
 # (pyMomentum v0.1.x by MomentumAS).  The correct package names are below.

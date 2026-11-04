@@ -8,7 +8,7 @@
 numpy>=1.24
 opencv-python>=4.8
 pillow>=10
-rfdetr>=1.0
+rfdetr>=1.8   # >=1.8 honours RF_HOME (weights cache dir); detector.py handles the 1.9+ inference() rename
 rerun-sdk>=0.21
 
 # Pulled in transitively by rfdetr; on Linux + CUDA you almost certainly
