@@ -304,8 +304,10 @@ class TemporalSmoother:
             timestamp = self._clock
 
         if self.mode == "1euro":
-            self._n_pushed += 1
+            # Count the frame only once it is filtered: if that raises, both
+            # counters stay equal and flush() has nothing left to drain.
             out = self._one_euro(frame, timestamp)
+            self._n_pushed += 1
             self._n_emitted += 1
             return out
 

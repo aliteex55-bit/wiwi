@@ -17,11 +17,13 @@ rem  foot is standing on the floor. Smoothing is the centred moving average
 rem  (it looks 2 frames ahead, so the exported motion does not lag).
 rem  Drag a video onto this file, or run from a Command Prompt:
 rem    export_mocap.bat "C:\path\to\clip.mp4"
+rem  A photo (.jpg / .png) works too and gives a one-frame pose.
 rem ==================================================================
 setlocal
 set "INPUT=%~f1"
 set "PREFIX=%~dpn1"
 set "RRD=%~dpn1.rrd"
+set "OUTDIR=%~dp1"
 set "ROOT=%~dp0"
 if "%ROOT:~0,2%"=="\\" goto :on_network
 cd /d "%~dp0"
@@ -51,6 +53,7 @@ echo     "%PREFIX%.track0.bvh"   the animation, for Blender (track1 = a second p
 echo     "%PREFIX%.track0.csv"   joint positions per frame, as a spreadsheet
 echo     "%PREFIX%.mocap.json"   everything, for programmers (also .mocap.npz)
 echo     "%RRD%"   the recording for the Rerun viewer
+echo     (the .rrd is large: about 5 GB per minute of Full-HD video - delete it if you only need the .bvh)
 echo   (a track1 file is a second person or a false detection - the report says which)
 echo   (the video must be in a normal folder on this PC - a phone, camera or
 echo    network location is read-only and nothing can be written there)
@@ -64,13 +67,16 @@ echo   the part of the clip processed so far.
 echo.
 rem Hides the harmless TracerWarning blocks that rfdetr's TorchScript pass prints at every start.
 set "PYTHONWARNINGS=ignore"
-".venv\Scripts\python.exe" demo.py --video "%INPUT%" --device %DEVICE% --detector-variant %DETECTOR% --smoothing-filter --smoothing-mode centered --detector-stride %STRIDE% --no-spawn --save-rrd "%RRD%" --export "%PREFIX%" %MHR%
+rem A photo goes in as --image: read as a video it is one frame, too short to be kept as a person.
+set "SRC=--video"
+for %%E in (.jpg .jpeg .png .bmp .webp) do if /i "%~x1"=="%%E" set "SRC=--image"
+".venv\Scripts\python.exe" demo.py %SRC% "%INPUT%" --device %DEVICE% --detector-variant %DETECTOR% --smoothing-filter --smoothing-mode centered --detector-stride %STRIDE% --no-spawn --save-rrd "%RRD%" --export "%PREFIX%" %MHR%
 rem -1073741510 is the Windows code for "stopped with Ctrl+C" (while the models were still loading).
 if "%errorlevel%"=="-1073741510" goto :stopped
 if not "%errorlevel%"=="0" goto :failed
+if not exist "%PREFIX%.track0.bvh" goto :no_person
 echo.
-echo Done. The files in "%~dp1":
-dir /b "%~dp1%~n1.*"
+echo Done. The new files are listed above under "motion capture written:" (in "%OUTDIR%").
 echo.
 echo To use the animation in Blender (4.x): File ^> Import ^> Motion Capture (.bvh), choose the
 echo .track0.bvh file. In the panel on the right set Scale to 0.01 (centimetres to metres) and tick
@@ -87,6 +93,13 @@ echo.
 echo Stopped. If it was stopped while writing, the motion-capture files may be incomplete.
 pause
 exit /b 0
+
+:no_person
+echo.
+echo ***** No person was found in the video - no animation was written (see the report above). *****
+echo See GUIDE_WINDOWS.md, section "Troubleshooting".
+pause
+exit /b 1
 
 :usage
 echo Usage: drag a video file onto export_mocap.bat
@@ -119,10 +132,13 @@ exit /b 1
 :failed
 echo.
 echo ***** InstantHMR stopped with an error. Scroll up to read it. *****
+echo If "motion capture written:" appears above, those files were still saved and cover the clip up to the error.
 echo If it says "Failed to create file: Access is denied" (or "Permission denied") right after
 echo Ready., copy the video to a folder on this PC first (for example C:\clips) and drag it from there.
 echo If it says "cv2.VideoCapture failed", the file you dragged is not a video (.mp4 / .mov / .avi);
 echo a .rrd recording goes onto open_recording.bat instead.
+echo If it says "could not write" or "cannot write", that file is open in another program (Excel):
+echo close it and run again.
 echo See GUIDE_WINDOWS.md, section "Troubleshooting".
 pause
 exit /b 1

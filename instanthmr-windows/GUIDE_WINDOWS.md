@@ -224,6 +224,10 @@ from a phone, camera or network location. To open a recording later, drag the
 `.rrd` file onto **`open_recording.bat`**. The viewer opens exactly as it was,
 without re-processing the video. The recording is only readable by the viewer
 that is installed in `.venv` (the Rerun version must match), so keep the bundle.
+The `.rrd` is large: about 5 GB per minute of Full-HD video (1920x1080, 30
+frames per second), twice that at 60. The drive the video is on needs that
+much free space; otherwise the run goes on to the end and then stops with `No
+space left on device`.
 
 **Is the graphics card being used?** Look at the `RF-DETR=` numbers printed
 every 30 frames: a graphics card gives roughly 10 to 50 ms, the processor 300
@@ -238,7 +242,11 @@ runs it and does nothing visible. `DEVICE` is `cuda` (NVIDIA card) or `cpu`.
 (default on a GPU), `base` or `large` (most accurate, slowest). After changing
 `DETECTOR`, the next run first downloads that detector (about 400 MB, once).
 If `config.bat` is missing, the run scripts say so and use `cuda` / `medium`
-until you run `setup_windows.bat` again.
+until you run `setup_windows.bat` again. `export_mocap.bat` runs the person
+detector on every frame when `config.bat` says `DEVICE=cuda` or
+`DETECTOR=medium`, and on every 2nd frame otherwise. So on a PC without a
+graphics card, choosing `medium` makes the export slow twice over: the
+detector is bigger, and it runs twice as often.
 
 ## Motion capture files (BVH for Blender)
 
@@ -249,7 +257,8 @@ onto **`export_mocap.bat`** instead. It processes the clip like
 somewhat slower, because the person detector runs on every frame; on the
 processor it takes 5 to 15 times the clip's length), then turns the per-frame
 skeletons into one steady animation per person and writes these files next
-to the video. For `C:\clips\dance.mp4`:
+to the video. A photo works too: drag it onto `export_mocap.bat` the same way
+and you get a one-frame pose. For `C:\clips\dance.mp4`:
 
 - `dance.track0.bvh` - the animation, for Blender and most other 3D tools
   (BVH is the standard motion-capture text format). One file per person:
@@ -257,14 +266,26 @@ to the video. For `C:\clips\dance.mp4`:
   extra track can also be a false detection (a coat on a hook, a reflection):
   the report, see below, marks a track that is short or low in confidence
   with `may be a false detection` - ignore its files.
-- `dance.track0.csv` - the same animation as a spreadsheet (opens in Excel):
-  one row per video frame, with the x / y / z position of every joint in
-  metres.
+- `dance.track0.csv` - the same animation as a spreadsheet: one row per
+  video frame, with the x / y / z position of every joint in metres (values
+  separated by commas, decimals with a point). On a PC set to Swedish (or
+  another language that writes decimals with a comma), double-clicking it
+  puts each whole row in column A. Instead open Excel, choose **Data > From
+  Text/CSV**, pick the file and set **Delimiter** to **Comma**; if the numbers
+  still show as text, first untick **File > Options > Advanced > Use system
+  separators** and set the decimal separator to a point. Close the file in
+  Excel before you run `export_mocap.bat` on the same video again: Windows
+  does not let the program overwrite a file Excel has open.
 - `dance.mocap.json` and `dance.mocap.npz` - everything (all persons, the raw
   and the cleaned-up positions, the model's own parameters), for programmers.
 - `dance.rrd` - the viewer recording, like the one `record_video.bat` makes
   (with the export's steadier smoothing). The viewer opens with it when the
-  script is finished.
+  script is finished. The `.rrd` is large: about 5 GB per minute of Full-HD
+  video (1920x1080, 30 frames per second), twice that at 60. The drive the
+  video is on needs that much free space; otherwise the run goes on to the
+  end and then stops with `No space left on device` and writes no `.bvh`. If
+  you only need the animation, delete the `.rrd` afterwards - the other files
+  do not need it.
 
 Copy the video to a folder on this PC first (for example `C:\clips`): the
 files are written next to the video, which does not work from a phone, camera
@@ -282,12 +303,16 @@ floor: y = -0.812 m before levelling (now y = 0); camera pitched 8.0 deg down, f
 foot anchoring: root movement per frame (real motion counts too), speed of planted feet
   track 0: root 6.3 -> 2.1 mm/frame (67% less); planted feet 0.141 -> 0.009 m/s (a foot is planted on 72% of foot-frames)
 finger chains ordered as expected
+writing files (about 10 s per minute of video) ...
 motion capture written:
   C:\clips\dance.mocap.json
   C:\clips\dance.mocap.npz
   C:\clips\dance.track0.csv
   C:\clips\dance.track0.bvh
 ```
+
+After `writing files ...` it can take a little while (about 10 seconds per
+minute of video) before the list of files appears.
 
 (The numbers are an invented example.) `samples` is the number of frames in
 the animation, `mean confidence` is how sure the detector was, on average,
@@ -323,9 +348,14 @@ Blender's default import settings puts them facing you in the Front view
 (numpad 1).
 
 **What to expect.** The skeleton has 70 points: body, face, both hands with
-all fingers, and the feet. The body proportions are measured once over the
-whole clip and held constant, so the figure does not change size from frame
-to frame. The feet are used to steady the body: a foot that stands on the
+all fingers, and the feet. In Blender it has more bones than that: the
+upper arm, for example, is the bone `left_shoulder_to_left_elbow`, and at the
+pelvis, neck, head, shoulders, elbows, wrists and ankles there is one extra
+bone that just continues the bone before it, straight on (past the wrist
+into the hand, for example). They are what lets every joint land exactly
+where it was measured; leave them be. The body proportions are measured
+once over the whole clip and held constant, so the figure does not change
+size from frame to frame. The feet are used to steady the body: a foot that stands on the
 floor is held in place on the floor, which removes most of the back-and-forth
 sliding the model would otherwise produce. Fast motion, a person partly out of the
 picture, two people crossing, or a person leaving and re-entering the frame
@@ -478,7 +508,9 @@ without reinstalling Windows, so this is your call; the scripts are plain text
 you can read in Notepad.
 
 **`No space left on device` / `There is not enough space on the disk`** - free
-space on drive C: (see "What you need"), then run setup again.
+space on drive C: (see "What you need"), then run setup again. During
+`export_mocap.bat` or `record_video.bat` it is the `.rrd` recording that
+filled the drive the video is on: delete old `.rrd` files, then run again.
 
 **Installing packages fails with a red error mentioning "pip" or a package
 name** - usually a dropped internet connection or a company proxy. Run
@@ -494,15 +526,26 @@ antivirus exceptions and run setup again.
 person, roughly upright, not too small in the frame. Only the 2 most confident
 people are processed per frame.
 
-**`mocap: no person was tracked for 2 frame(s) or more` in the report, and
+**`No person was found in the video` at the end of `export_mocap.bat`, and
+`mocap: no person was tracked for 2 frame(s) or more` in the report** -
 `motion capture written:` lists only the `.mocap.json` and `.mocap.npz`
-files - no `.bvh` or `.csv` appeared** - there was no animation to write (the
-`.mocap.json` and `.mocap.npz` files are still written, without tracks). See
-"Nothing is detected in the picture". **`Failed to create file: Access is
-denied` (or `Permission denied`, `No such file or directory`) right after
-`Ready.`, before any `frame` line** - the recording and the files go next to
-the video, so the video must be in a folder this PC can write to: copy it to
-`C:\clips` and drag it from there.
+files, without tracks; there was no animation to write, so no `.bvh` or
+`.csv`. See "Nothing is detected in the picture".
+
+**`Failed to create file: Access is denied` (or `Permission denied`, `No
+such file or directory`) right after `Ready.`, before any `frame` line** -
+the recording and the files go next to the video, so the video must be in a
+folder this PC can write to: copy it to `C:\clips` and drag it from there.
+
+**`could not write` or `cannot write` with a file name, at the start or at
+the end of `export_mocap.bat`** - that file is open in another program,
+usually the `.csv` in Excel. Close it and run again. (At the end, the other
+files were still written.)
+
+**`File not found: "C:\...\rock"`, with the file name cut short** - Windows
+does not put quotes around a dragged file name that contains `&` but no
+space, and the `&` cuts the name. Rename the video without `&` (or `^`) and
+drag it again.
 
 **`MHR SETUP FAILED`** - see the end of "Optional - draw the body surface".
 

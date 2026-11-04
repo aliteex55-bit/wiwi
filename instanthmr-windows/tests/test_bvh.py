@@ -8,10 +8,18 @@ import pytest
 
 from instanthmr import bvh
 from instanthmr.mocap_skeleton import (
-    NODE_NAMES, PARENTS, REST_DIRECTIONS, ROOT, TOPOLOGICAL_ORDER,
+    CHILDREN, NODE_NAMES, PARENTS, REST_DIRECTIONS, ROOT, TOPOLOGICAL_ORDER,
 )
 
 SCALE = 100.0           # write_bvh default: metres -> centimetres
+#: The file has one ``<fork>_to_<child>`` joint per child of every fork.
+N_FORK_JOINTS = sum(len(c) for c in CHILDREN if len(c) >= 2)
+
+
+def tree_positions(parsed: bvh.Bvh) -> np.ndarray:
+    """``fk(parsed)`` for the 71 tree nodes only, in ``NODE_NAMES`` order, in
+    file units (the file holds them in its own order, plus the fork joints)."""
+    return bvh.fk(parsed)[:, [parsed.names.index(n) for n in NODE_NAMES]]
 
 
 def random_rotation(rng: np.random.Generator) -> np.ndarray:
@@ -151,7 +159,8 @@ def test_rigid_round_trip_real_tree(tmp_path):
     lines = text.splitlines()
     frame_lines = lines[lines.index("Frames: 20") + 2:]
     assert len(frame_lines) == 20
-    assert all(len(line.split()) == 6 + 3 * 70 for line in frame_lines)
+    assert N_FORK_JOINTS == 36          # 71 tree nodes -> 107 joints in the file
+    assert all(len(line.split()) == 6 + 3 * (70 + N_FORK_JOINTS) for line in frame_lines)
     n_leaves = sum(1 for j in range(len(NODE_NAMES)) if j not in PARENTS)
     assert n_leaves == 26 and text.count("End Site") == n_leaves
 
@@ -159,19 +168,30 @@ def test_rigid_round_trip_real_tree(tmp_path):
     parsed = bvh.read_bvh(path)
     assert parsed.names[0] == "hips" and parsed.parents[0] == -1
     assert parsed.frame_time == pytest.approx(1 / 30)
-    assert parsed.motion.shape == (20, 6 + 3 * 70)
-    perm = [NODE_NAMES.index(n) for n in parsed.names]
+    assert parsed.motion.shape == (20, 6 + 3 * (70 + N_FORK_JOINTS))
+    fork_joints = [i for i, n in enumerate(parsed.names) if "_to_" in n]
+    assert len(fork_joints) == N_FORK_JOINTS
+    tree = [i for i in range(len(parsed.names)) if i not in fork_joints]
+    perm = [NODE_NAMES.index(parsed.names[i]) for i in tree]
     assert sorted(perm) == list(range(len(NODE_NAMES)))
-    np.testing.assert_allclose(parsed.offsets[1:], rest[perm][1:] * SCALE, atol=1e-6)
-    err = np.linalg.norm(bvh.fk(parsed) - positions[:, perm] * SCALE, axis=-1)
+    np.testing.assert_allclose(parsed.offsets[tree][1:], rest[perm][1:] * SCALE, atol=1e-6)
+    np.testing.assert_array_equal(parsed.offsets[fork_joints], 0.0)
+    # every fork joint sits between a fork and one of its children
+    for i in fork_joints:
+        fork, child = parsed.names[i].split("_to_")
+        assert parsed.names[parsed.parents[i]] == fork
+        assert [parsed.names[c] for c, p in enumerate(parsed.parents) if p == i] == [child]
+    err = np.linalg.norm(bvh.fk(parsed)[:, tree] - positions[:, perm] * SCALE, axis=-1)
     assert err.max() < 1e-3             # file units (cm), i.e. 0.01 mm
+    # rigid motion: the fork joints add no rotation of their own
+    rot = parsed.motion[:, 6:].reshape(20, -1, 3)    # one (z, x, y) triple per joint, file order
+    assert np.abs(rot[:, [i - 1 for i in fork_joints]]).max() < 1e-6
 
     # at a fork the Kabsch solve recovers the true orientation, twist included
     forks = [j for j in range(len(NODE_NAMES)) if PARENTS.count(j) >= 2]
     assert ROOT in forks and len(forks) == 11   # pelvis, neck, nose, 2x shoulder/elbow/wrist/ankle
-    order = [NODE_NAMES.index(n) for n in parsed.names]
     for t in (0, 7, 19):
-        solved, _ = bvh.solve_frame(PARENTS, rest, positions[t], order)
+        solved, _ = bvh.solve_frame(PARENTS, rest, positions[t], perm)   # perm: parents first
         for j in forks:
             np.testing.assert_allclose(solved[j], true_global[t, j], atol=1e-9)
 
@@ -179,8 +199,8 @@ def test_rigid_round_trip_real_tree(tmp_path):
 def test_noisy_input_is_bounded(tmp_path):
     """1 cm of noise in a random direction on every joint of every frame. The
     file keeps bone directions and rest lengths, so the error is the length
-    mismatch accumulated down each chain plus the Kabsch compromise at forks:
-    bounded, not zero (observed: max 4.9 cm, mean 1.6 cm)."""
+    mismatch accumulated down each chain: bounded, not zero (observed: max
+    4.4 cm, mean 1.4 cm; 4.9 / 1.6 cm before the fork joints)."""
     rng = np.random.default_rng(4)
     rest = real_rest_offsets()
     clean, _ = animate(PARENTS, TOPOLOGICAL_ORDER, rest, rng, 20)
@@ -188,12 +208,59 @@ def test_noisy_input_is_bounded(tmp_path):
     noisy = clean + 0.01 * direction / np.linalg.norm(direction, axis=-1, keepdims=True)
     path = tmp_path / "noisy.bvh"
     bvh.write_bvh(path, NODE_NAMES, PARENTS, rest, noisy, fps=25.0)
-    parsed = bvh.read_bvh(path)
-    perm = [NODE_NAMES.index(n) for n in parsed.names]
-    err_cm = np.linalg.norm(bvh.fk(parsed) - noisy[:, perm] * SCALE, axis=-1)
+    err_cm = np.linalg.norm(tree_positions(bvh.read_bvh(path)) - noisy * SCALE, axis=-1)
     print(f"noisy round trip: max {err_cm.max():.2f} cm, mean {err_cm.mean():.2f} cm")
     assert err_cm.max() < 6.0
     assert err_cm.mean() < 2.0
+
+
+def _tilted(d: np.ndarray, degrees: float, rng: np.random.Generator) -> np.ndarray:
+    """Unit vector ``d`` turned by ``degrees`` about a random axis normal to it."""
+    axis = np.cross(d, rng.normal(size=3))
+    axis /= np.linalg.norm(axis)
+    t = np.radians(degrees)
+    return d * np.cos(t) + np.cross(axis, d) * np.sin(t)
+
+
+def _turn_subtree(pose: np.ndarray, node: int, pivot: int, R: np.ndarray) -> np.ndarray:
+    """``pose`` with ``node`` and everything below it rotated by ``R`` about ``pivot``."""
+    below, stack = [], [node]
+    while stack:
+        below.append(stack.pop())
+        stack.extend(CHILDREN[below[-1]])
+    out = pose.copy()
+    out[below] = (pose[below] - pose[pivot]) @ R.T + pose[pivot]
+    return out
+
+
+def test_exact_lengths_round_trip_exactly_at_forks(tmp_path):
+    """Bone lengths equal the rest lengths, no noise, but the children of the
+    forks are NOT where one rotation of the rest pose would put them. Before
+    the fork joints the file was off by 3.8 cm (bones 10 degrees off the rest
+    directions), 6.1 cm (head turned 60 degrees: the face) and 2.4 cm (a
+    15 degree side bend over a level pelvis: one whole leg); with them every
+    position comes back exactly."""
+    rng = np.random.default_rng(6)
+    rest = real_rest_offsets()
+    lengths = np.linalg.norm(rest, axis=1)
+    anatomy = np.zeros_like(rest)        # this person's bones: 10 degrees off the T-pose
+    for j in range(len(NODE_NAMES)):
+        if j != ROOT:
+            anatomy[j] = _tilted(REST_DIRECTIONS[j], 10.0, rng)
+    standing = np.zeros_like(rest)
+    for j in TOPOLOGICAL_ORDER[1:]:
+        standing[j] = standing[PARENTS[j]] + anatomy[j] * lengths[j]
+    c, s = np.cos(np.radians(60.0)), np.sin(np.radians(60.0))
+    turn = np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])          # about y
+    c, s = np.cos(np.radians(15.0)), np.sin(np.radians(15.0))
+    bend = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])          # about z
+    neck, nose = NODE_NAMES.index("neck"), NODE_NAMES.index("nose")
+    moving = _turn_subtree(_turn_subtree(standing, nose, neck, turn), neck, ROOT, bend)
+    positions = np.stack([standing, moving]) + [0.3, 1.0, -2.0]
+    path = tmp_path / "forks.bvh"
+    bvh.write_bvh(path, NODE_NAMES, PARENTS, rest, positions, fps=30.0)
+    err_cm = np.linalg.norm(tree_positions(bvh.read_bvh(path)) - positions * SCALE, axis=-1)
+    assert err_cm.max() < 1e-3, err_cm.max()
 
 
 def test_chain_only_tree(tmp_path):

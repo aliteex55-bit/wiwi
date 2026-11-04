@@ -16,8 +16,8 @@ import pytest
 
 from instanthmr.inference import HMRPrediction
 from instanthmr.mocap import (
-    MocapRecorder, anchor_root, estimate_floor, estimate_pitch, fill_gaps,
-    normalise_bone_lengths, planted_feet, to_world,
+    MocapRecorder, _rotation_about_x, anchor_root, estimate_floor, estimate_pitch,
+    fill_gaps, normalise_bone_lengths, planted_feet, to_world,
 )
 from instanthmr.mocap_skeleton import (
     CAM_TO_WORLD, FOOT_NODES, NODE_NAMES, NUM_NODES, PARENTS, REST_DIRECTIONS, ROOT,
@@ -227,8 +227,9 @@ def test_anchor_root_two_feet_to_one_foot_has_no_jump():
     # The right foot stays planted and still on both sides of the transition. On
     # the transition frame itself it is re-locked at its current output position
     # (that is what keeps the offset continuous), so there it may move by at
-    # most one frame of jitter. The foot speed is a +-2 frame central
-    # difference, so the left foot's lift at frame 20 is seen from frame 18 on.
+    # most one frame of jitter. The foot speed is a central difference over
+    # +-1/15 s, at this 10 fps +-1 frame, so the left foot's lift at frame 20
+    # is seen from frame 19 on.
     step = xz_steps(foot_mean(out, "right"))
     moving = np.flatnonzero(step > 1e-6)
     assert len(moving) == 1 and 17 <= moving[0] <= 19, moving
@@ -286,6 +287,41 @@ def test_planted_feet_survive_centimetre_jitter_at_30fps():
     assert planted[:, 0].mean() < 0.05, planted[:, 0].mean()     # left: sliding
 
 
+def walk(n: int, fps: float, stance: float = 0.5, jitter: float = 0.005,
+         seed: int = 0) -> np.ndarray:
+    """``(n, 71, 3)``: a walk along +z at 1.2 m/s. Each foot stands still for
+    ``stance`` seconds, then swings forward for as long, lifted up to 8 cm, so
+    each foot is planted half the time. Plus cam_trans-like Gaussian jitter
+    (``jitter`` metres per axis, the same on every joint of a frame)."""
+    base = standing_skeleton()
+    t = np.arange(n) / fps
+    step = 1.2 * stance                          # distance the body covers in one stance
+    joints = np.repeat(base[None], n, axis=0)
+    joints[:, :, 2] += (t * 1.2)[:, None]
+    for side, phase in (("left", 0.0), ("right", 0.5)):
+        nodes = list(FOOT_NODES[side])
+        u = (t / (2 * stance) + phase) % 1.0     # where in its stride the foot is
+        z_plant = (np.floor(t / (2 * stance) + phase) + phase) * 2 * step
+        swing = np.clip(2 * u - 1, 0.0, 1.0)     # 0 -> 1 during the swing
+        z = np.where(u < 0.5, z_plant, z_plant + swing * 2 * step)
+        joints[:, nodes, 2] = base[nodes, 2] + z[:, None]
+        joints[:, nodes, 1] = base[nodes, 1] + np.where(u < 0.5, 0.0, 0.08 * np.sin(np.pi * swing))[:, None]
+    rng = np.random.default_rng(seed)
+    return joints + rng.normal(0.0, jitter, size=(n, 1, 3))
+
+
+def test_planted_feet_at_low_frame_rates():
+    # A 30 fps walk pushed at 30, 15 and 10 fps (--frame-skip 1, 2, 3, or a
+    # 10 fps security camera). A +-2 SAMPLE speed window is 0.4 s at 10 fps,
+    # as long as a stance: it reached into the swing at both ends of every
+    # stance and left 1% of foot-frames planted, so the anchoring did nothing.
+    # Fixed at +-1/15 s it measures the same motion at every rate.
+    joints = walk(1800, 30.0)
+    for k in (1, 2, 3):
+        planted = planted_feet(joints[::k], 30.0 / k)
+        assert 0.3 < planted.mean() <= 0.5, (k, planted.mean())
+
+
 # ----------------------------------------------------------------------
 def make_prediction(joints_world: np.ndarray, bbox, confidence=0.9, contact=None,
                     track_id=None) -> HMRPrediction:
@@ -312,8 +348,10 @@ def make_prediction(joints_world: np.ndarray, bbox, confidence=0.9, contact=None
 
 def two_person_recorder(fps=25.0, frame_step=1, n=10, missing=(5,), **kw) -> MocapRecorder:
     """Person A (stamped track_id=3) stands at x=0 with cam_trans-like jitter
-    and is missing on ``missing`` frames; person B (no track_id) stands still at
-    x=1.5. Frames are pushed at 25 per second whatever ``fps`` says."""
+    and is missing on ``missing`` frames; person B (no track_id, so the
+    recorder's tracker calls it 0) stands still at x=1.5. Frames are pushed at
+    25 per second whatever ``fps`` says. The export numbers the tracks 0, 1,
+    ... in order of first appearance, so A comes out as track 1."""
     rec = MocapRecorder(fps=fps, frame_step=frame_step, **kw)
     a, _ = jittered_standing(n, seed=4, amp=0.003)    # 3 mm: under speed_thresh at 25 fps
     b = standing_skeleton()[None].repeat(n, axis=0)
@@ -330,7 +368,7 @@ def two_person_recorder(fps=25.0, frame_step=1, n=10, missing=(5,), **kw) -> Moc
 def test_recorder_end_to_end():
     rec = two_person_recorder()
     tracks = rec.finish()
-    assert [t.track_id for t in tracks] == [0, 3]
+    assert [t.track_id for t in tracks] == [0, 1]
     assert rec.finish() is tracks                       # idempotent
     b, a = tracks
     for t in (a, b):
@@ -367,7 +405,7 @@ def test_recorder_export_json_npz_csv(tmp_path):
     rec = two_person_recorder()
     paths = rec.export(tmp_path / "dance", formats=("json", "npz", "csv"))
     assert [p.name for p in paths] == ["dance.mocap.json", "dance.mocap.npz",
-                                       "dance.track0.csv", "dance.track3.csv"]
+                                       "dance.track0.csv", "dance.track1.csv"]
     assert all(p.exists() for p in paths)
 
     doc = json.loads(paths[0].read_text())
@@ -377,21 +415,21 @@ def test_recorder_export_json_npz_csv(tmp_path):
         assert key in doc
     assert doc["joint_names"] == NODE_NAMES and len(doc["joint_names"]) == 71
     assert doc["parents"] == PARENTS and doc["fps"] == 25.0 and doc["num_frames"] == 10
-    assert [t["id"] for t in doc["tracks"]] == [0, 3]
-    t3 = doc["tracks"][1]
-    assert (t3["first_frame"], t3["last_frame"], t3["num_frames"], t3["num_filled"]) == (0, 9, 10, 1)
-    assert len(t3["bone_lengths"]) == 71 and len(t3["frames"]) == 10
-    f = t3["frames"][5]
+    assert [t["id"] for t in doc["tracks"]] == [0, 1]
+    t1 = doc["tracks"][1]
+    assert (t1["first_frame"], t1["last_frame"], t1["num_frames"], t1["num_filled"]) == (0, 9, 10, 1)
+    assert len(t1["bone_lengths"]) == 71 and len(t1["frames"]) == 10
+    f = t1["frames"][5]
     assert f["valid"] is False and f["frame"] == 5
     assert len(f["joints_world"]) == 71 and len(f["joints_world"][0]) == 3
     assert len(f["joints_2d"]) == 70 and len(f["mhr_params"]) == 204 and f["contact"] is None
 
     npz = np.load(paths[1])
     assert set(npz.files) >= {"fps", "frame_step", "floor_y", "joint_names", "parents", "track_ids"}
-    assert list(npz["track_ids"]) == [0, 3] and list(npz["joint_names"]) == NODE_NAMES
-    assert npz["track3_joints_world"].shape == (10, 71, 3)
-    assert npz["track3_valid"].dtype == bool and npz["track3_bone_lengths"].shape == (71,)
-    assert "track3_contact" not in npz.files
+    assert list(npz["track_ids"]) == [0, 1] and list(npz["joint_names"]) == NODE_NAMES
+    assert npz["track1_joints_world"].shape == (10, 71, 3)
+    assert npz["track1_valid"].dtype == bool and npz["track1_bone_lengths"].shape == (71,)
+    assert "track1_contact" not in npz.files
 
     rows = list(csv.reader(paths[3].open()))
     assert len(rows) == 11 and all(len(r) == 4 + 71 * 3 for r in rows)
@@ -403,7 +441,7 @@ def test_recorder_export_bvh(tmp_path):
     pytest.importorskip("instanthmr.bvh")
     rec = two_person_recorder()
     paths = rec.export(tmp_path / "dance", formats=("bvh",))
-    assert [p.name for p in paths] == ["dance.track0.bvh", "dance.track3.bvh"]
+    assert [p.name for p in paths] == ["dance.track0.bvh", "dance.track1.bvh"]
     text = paths[1].read_text()
     assert "Frames: 10" in text and "HIERARCHY" in text
 
@@ -527,6 +565,72 @@ def test_recorder_levels_a_pitched_camera():
     assert estimate_pitch([joints, far], [valid, valid]) == 0.0
 
 
+def test_estimate_pitch_ignores_a_frame_with_a_bad_depth():
+    # Level camera 1.2 m above the floor, a person standing 4 m away for 300
+    # frames with 1% depth jitter. A depth error slides the whole person along
+    # the camera ray, so it also moves them in height. One frame 1.3x too far
+    # (a person half out of the picture) used to open the 1 m depth gate on
+    # its own and then, as the one far-off point, tilt the fit by 17 degrees.
+    rng = np.random.default_rng(7)
+    person = standing_skeleton() + [0.0, -1.2, -4.0]
+    scale = 1.0 + rng.normal(0.0, 0.01, size=300)
+    scale[150] = 1.3
+    joints = np.stack([to_world(to_world(person) * s) for s in scale])   # to_world is its own inverse
+    assert estimate_pitch([joints], [np.ones(300, dtype=bool)]) == 0.0
+
+
+def test_camera_pitch_is_written_and_relates_the_files_to_the_camera(tmp_path):
+    # joints_world is the camera's view rotated level and moved to the floor;
+    # with the pitch in the files a reader can undo both (no foot anchoring here).
+    rec = pitched_camera_walk(10.0)
+    json_path, npz_path = rec.export(tmp_path / "walk", ("json", "npz"))
+    doc = json.loads(json_path.read_text())
+    assert doc["camera_pitch_deg"] == pytest.approx(10.0, abs=0.1)
+    assert "camera_pitch_deg" in doc["coordinate_system"]["joints_world"]
+    npz = np.load(npz_path)
+    assert float(npz["camera_pitch_deg"]) == doc["camera_pitch_deg"]
+    world = npz["track0_joints_world"].astype(np.float64) + [0.0, float(npz["floor_y"]), 0.0]
+    level = _rotation_about_x(-np.radians(float(npz["camera_pitch_deg"])))
+    np.testing.assert_allclose(world @ level, to_world(npz["track0_joints_cam"]), atol=1e-4)
+
+
+def test_fill_gaps_turns_root_rotation_the_short_way():
+    # Back to the camera, the root's extrinsic-XYZ Euler angles sit at +-pi:
+    # frames 0 and 5 are 2.8 degrees apart as rotations but (-179, 1, 180)
+    # and (179, -1, 180) degrees as numbers. Interpolated number by number,
+    # the filled frames 1-4 turned 72, 143, 145 and 74 degrees away.
+    def rotation(xyz_rad):
+        a, b, c = xyz_rad
+        rx = np.array([[1, 0, 0], [0, np.cos(a), -np.sin(a)], [0, np.sin(a), np.cos(a)]])
+        ry = np.array([[np.cos(b), 0, np.sin(b)], [0, 1, 0], [-np.sin(b), 0, np.cos(b)]])
+        rz = np.array([[np.cos(c), -np.sin(c), 0], [np.sin(c), np.cos(c), 0], [0, 0, 1]])
+        return rz @ ry @ rx
+
+    def degrees_between(r1, r2):
+        return np.degrees(np.arccos(np.clip((np.trace(r1.T @ r2) - 1.0) / 2.0, -1.0, 1.0)))
+
+    rec = MocapRecorder(fps=25.0)
+    ends = {0: np.radians([-179.0, 1.0, 180.0]), 5: np.radians([179.0, -1.0, 180.0])}
+    pushed = {}
+    for i, root in ends.items():
+        p = make_prediction(standing_skeleton(), [100, 100, 200, 400], track_id=0)
+        p.mhr_params[3:6] = root
+        p.mhr_params[10] = -3.1          # a joint angle near -pi: must not jump either
+        pushed[i] = p.mhr_params.copy()
+        rec.push(i, i / 25.0, [p])
+    (t,) = rec.finish()
+    assert t.mhr_params.dtype == np.float32 and list(t.valid) == [1, 0, 0, 0, 0, 1]
+    for i in ends:                       # the pushed rows are untouched
+        np.testing.assert_array_equal(t.mhr_params[i], pushed[i])
+    r0, r5 = rotation(t.mhr_params[0, 3:6]), rotation(t.mhr_params[5, 3:6])
+    total = degrees_between(r0, r5)
+    assert total == pytest.approx(2.83, abs=0.01)
+    for i in range(1, 5):
+        r = rotation(t.mhr_params[i, 3:6])
+        assert degrees_between(r0, r) <= total + 1e-3 and degrees_between(r, r5) <= total + 1e-3
+        assert abs(t.mhr_params[i, 10] + 3.1) < 1e-6
+
+
 def test_report_no_tracks():
     rec = MocapRecorder(fps=30.0)
     text = rec.report()
@@ -553,15 +657,46 @@ def test_recorder_drops_short_tracks_and_reports():
     # A one-frame false positive, far from both persons.
     rec.push(4, 4 / 25.0, [make_prediction(standing_skeleton() + [0, 0, -3], [1000, 50, 1050, 150])])
     tracks = rec.finish()
-    assert [t.track_id for t in tracks] == [0, 3]
+    assert [t.track_id for t in tracks] == [0, 1]
     text = rec.report()
-    for word in ("track 0", "track 3", "floor", "finger", "1 dropped"):
+    for word in ("track 0", "track 1", "floor", "finger", "1 dropped"):
         assert word in text, text
+
+
+def test_first_person_is_track0_after_a_dropped_false_detection(tmp_path):
+    # A one-frame false detection (a reflection) on frame 0 takes the tracker's
+    # id 0; the person walks in on frame 2. The files must still say track0.
+    rec = MocapRecorder(fps=25.0)
+    rec.push(0, 0.0, [make_prediction(standing_skeleton() + [0, 0, -3], [1000, 50, 1050, 150])])
+    for i in range(2, 20):
+        rec.push(i, i / 25.0, [make_prediction(standing_skeleton(), [100, 100, 200, 400])])
+    paths = rec.export(tmp_path / "shop", ("csv", "bvh"))
+    assert [p.name for p in paths] == ["shop.track0.csv", "shop.track0.bvh"]
+    assert "track 0: frames 2-19" in rec.report()
+
+
+def test_no_floor_turns_the_foot_anchoring_off():
+    # Without the floor step y = 0 is the camera's height, so with the camera
+    # 1.4 m above the floor every foot passed the "low" test and a foot lifted
+    # slowly (0.26 m/s) counted as planted: it held still and dragged the
+    # standing foot and the body 15 cm back. The anchoring needs the floor.
+    fps, n = 30.0, 45
+    joints = np.repeat((standing_skeleton() + [0.0, -1.4, -3.0])[None], n, axis=0)
+    lift = np.linspace(0.0, 1.0, n)[:, None] * [0.0, 0.25, 0.30]   # up 25 cm, forward 30 cm in 1.5 s
+    joints[:, list(FOOT_NODES["right"])] += lift[:, None, :]
+    for floor in (True, False):
+        rec = MocapRecorder(fps=fps, floor=floor)
+        for i in range(n):
+            rec.push(i, i / fps, [make_prediction(joints[i], [100, 100, 200, 400], track_id=0)])
+        (t,) = rec.finish()
+        left = foot_mean(t.joints_world.astype(np.float64), "left")
+        assert np.abs(left[:, [0, 2]] - left[0, [0, 2]]).max() < 0.01, floor
+    assert rec.footlock is False and "foot anchoring: off" in rec.report()
 
 
 def test_report_mentions_tracks_floor_and_fingers():
     rec = two_person_recorder()
     text = rec.report()
-    assert "track 0" in text and "track 3" in text
+    assert "track 0" in text and "track 1" in text
     assert "floor" in text and "finger" in text and "ordered as expected" in text
     assert "camera pitch not measured" in text and "false detection" not in text

@@ -5,6 +5,7 @@ two persons keep distinct ids; a track survives ``max_age`` absent frames."""
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from instanthmr.mocap import MocapRecorder
 from instanthmr.smoothing import TemporalSmoother
@@ -60,3 +61,21 @@ def test_track_survives_max_age_absent_frames():
             out = sm.push([make_prediction(pose, BOX_A)] if present else [])
             ids |= {p.track_id for p in out}
         assert ids == expected, (max_age, ids)
+
+
+def test_1euro_error_leaves_nothing_to_flush():
+    # demo.py flushes the smoother after an error in the frame loop. An error
+    # inside the 1euro filter (here the MHR keypoint backend, on frame 2) used
+    # to leave that frame counted as pushed but not emitted, and flush() then
+    # raised IndexError on its empty buffer, hiding the real error.
+    def keypoints(mhr_params, shape_params):
+        keypoints.calls += 1
+        if keypoints.calls == 2:
+            raise RuntimeError("non-finite pose parameters")
+        return np.zeros((70, 3), np.float32)
+    keypoints.calls = 0
+    sm = TemporalSmoother(mode="1euro", keypoint_fn=keypoints)
+    sm.push([make_prediction(standing_skeleton(), BOX_A)], timestamp=0.0)
+    with pytest.raises(RuntimeError):
+        sm.push([make_prediction(standing_skeleton(), BOX_A)], timestamp=1 / 30)
+    assert list(sm.flush()) == []

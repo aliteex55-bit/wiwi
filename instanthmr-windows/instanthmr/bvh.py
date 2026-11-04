@@ -59,7 +59,10 @@ Conventions this writer uses
   Its position channels carry the root's absolute position in file units,
   not a delta from the offset (the offset is zero).
 * Every other joint has ``OFFSET`` = its rest-pose vector from its parent in
-  file units, and the same three rotation channels.
+  file units, and the same three rotation channels. The file also has one
+  extra joint per child of every fork, ``<fork>_to_<child>``, with ``OFFSET
+  0 0 0`` (see "Forks" below), so it holds more joints than the caller's
+  tree: 107 for the 71-node mocap tree.
 * Every leaf gets an ``End Site``: a stub continuing the leaf's own bone for
   ``end_site_fraction`` of its length, so readers that draw a bone from each
   joint to its child do not make a zero-length bone at the tips.
@@ -84,13 +87,14 @@ parent's solved global rotation (identity for the root):
   minimises ``sum_c L_c^2 |G a_c - b_c|^2``, where ``L_c`` is the rest length
   of bone ``c`` -- in other words, the rotation that best maps the rest
   offsets onto the current directions drawn at rest length. Two non-collinear
-  directions pin a rotation down completely, so at every fork -- pelvis, neck,
-  shoulders, elbows, wrists, ankles, head -- the file gets the true
-  orientation, twist included. The length weighting only matters on noisy
-  input, and there it matters a lot: with 1 cm of noise a 3 cm landmark (the
-  cubital fossa) is 20 degrees off while the 26 cm forearm next to it is under
-  3 degrees off. With equal weights the landmark steers the elbow's
-  orientation and that error is multiplied by the forearm and the whole hand
+  directions pin a rotation down completely, so for a rigid motion of the
+  skeleton every fork -- pelvis, neck, shoulders, elbows, wrists, ankles,
+  head -- gets its true orientation, twist included. The length weighting
+  only matters on noisy input, and there it matters a lot: with 1 cm of
+  noise a 3 cm landmark (the cubital fossa) is 20 degrees off while the 26 cm
+  forearm next to it is under 3 degrees off. With equal weights the landmark
+  steers the elbow's orientation and that error is multiplied by the forearm
+  and the whole hand
   (measured on the test skeleton with 1 cm-per-axis Gaussian noise:
   fingertips up to 19.5 cm off with equal weights, 8.4 cm with length
   weights).
@@ -103,14 +107,41 @@ parent's solved global rotation (identity for the root):
   ``G_p a_c``; the swing fixes only the remaining direction error.
 * **Leaf**: nothing to measure, ``G_j = G_p``.
 
+Forks
+-----
+One rotation at a fork places every child only if the angles between the
+children's current directions equal the angles between their rest
+directions, and on real data they do not. The rest directions are a
+hand-written T-pose, not this person's anatomy, and ordinary motion moves the
+children of a fork against each other: the head nods against the shoulders
+at the neck, the spine bends against the hip line at the pelvis, the thumb
+moves against the palm. Whatever the Kabsch fit leaves over would be stored
+nowhere: the child would sit off its measured position and carry its whole
+subtree with it. Measured with exact bone lengths and no noise: bone
+directions 10 degrees off the rest ones put the wrists 2.8 cm off in every
+frame of a person standing still, a 60 degree head turn put the face 6.1 cm
+off, and a torso sway with planted feet made the feet bob 3.2 cm in the file
+although they did not move at all in the input.
+
+So :func:`write_bvh` puts a joint ``<fork>_to_<child>`` between a fork and
+each of its children. It sits on the fork (``OFFSET 0 0 0``) and has the one
+child, so it is a chain joint: its rotation turns that child's bone onto the
+child's measured direction, and every bone has its own rotation. The fork's
+Kabsch fit looks through these joints to the real children, so the fork keeps
+its orientation; for a rigid motion each such joint's local rotation is the
+identity. The cost is a zero-length bone at each fork joint itself, which
+Blender's importer replaces with a copy of the parent bone's vector, so in
+Blender it continues the bone before it.
+
 The file stores the local rotation ``L_j = G_p^T @ G_j`` (``L = G`` for the
-root) as ZXY Euler angles. For a rigid motion of this skeleton -- positions
-that really are the rest offsets rotated hierarchically -- the solve is exact
-and ``fk(read_bvh(path))`` returns the input positions to rounding error.
-For non-rigid input (per-frame noise, bone lengths that disagree with the
-rest offsets) the file keeps each bone's *direction* and its *rest length*,
-so length errors accumulate along a chain. Clean the positions first; that
-is ``mocap.py``'s job.
+root) as ZXY Euler angles. With the fork joints above, every bone keeps its
+measured *direction* exactly and gets its *rest length*, so whenever the
+input's bone lengths equal the rest lengths -- which ``mocap.py``'s
+bone-length normalisation guarantees -- ``fk(read_bvh(path))`` returns the
+input positions to rounding error, whatever the pose. Input whose lengths
+disagree with the rest offsets (per-frame noise) comes back with those length
+errors accumulated along each chain. Clean the positions first; that is
+``mocap.py``'s job.
 
 :func:`read_bvh` and :func:`fk` are a small parser and forward-kinematics
 pass for checking a written file. They handle any channel order, and joint
@@ -225,7 +256,10 @@ def solve_frame(parents: Sequence[int], rest_offsets: np.ndarray, pos: np.ndarra
         G_p = global_rot[p] if p >= 0 else np.eye(3)
         rest, cur, lengths = [], [], []      # unit rest / current directions, rest lengths
         for c in children[j]:
-            a, b = rest_offsets[c], pos[c] - pos[j]
+            # A zero-offset joint with one child sits on j (see "Forks"):
+            # measure through it, to the child it leads to.
+            g = children[c][0] if not rest_offsets[c].any() and len(children[c]) == 1 else c
+            a, b = rest_offsets[g], pos[g] - pos[j]
             na, nb = np.linalg.norm(a), np.linalg.norm(b)
             if na > 0.0 and nb > 0.0:
                 rest.append(a / na)
@@ -257,7 +291,8 @@ def write_bvh(path, names: Sequence[str], parents: Sequence[int], rest_offsets: 
     ``rest_offsets[j]`` is the rest-pose vector from ``parents[j]`` to ``j``
     in metres (zero for the root); it becomes the joint's ``OFFSET`` after
     ``scale``. ``scale`` converts metres to file units (100 = centimetres).
-    See the module docstring for the file layout and the rotation solve.
+    See the module docstring for the file layout, the rotation solve, and the
+    ``<fork>_to_<child>`` joints the file gets on top of ``names``.
     """
     names, parents = list(names), list(parents)
     rest_offsets = np.asarray(rest_offsets, dtype=np.float64)
@@ -269,6 +304,19 @@ def write_bvh(path, names: Sequence[str], parents: Sequence[int], rest_offsets: 
     if rest_offsets.shape != (J, 3) or positions.ndim != 3 or positions.shape[1:] != (J, 3):
         raise ValueError(f"rest_offsets {rest_offsets.shape} / positions {positions.shape} "
                          f"do not match {J} joints")
+    # A zero-offset joint between every fork and each of its children, so
+    # every bone gets its own rotation (module docstring, "Forks").
+    kids = [[c for c, p in enumerate(parents) if p == j] for j in range(J)]
+    rest_list, pos_list = list(rest_offsets), list(positions.transpose(1, 0, 2))
+    for j in range(J):
+        if len(kids[j]) >= 2:
+            for c in kids[j]:
+                names.append(f"{names[j]}_to_{names[c]}")
+                parents.append(j)
+                parents[c] = len(names) - 1
+                rest_list.append(np.zeros(3))
+                pos_list.append(pos_list[j])
+    rest_offsets, positions, J = np.array(rest_list), np.stack(pos_list, axis=1), len(names)
     root = roots[0]
     children: list[list[int]] = [[] for _ in range(J)]
     for c, p in enumerate(parents):

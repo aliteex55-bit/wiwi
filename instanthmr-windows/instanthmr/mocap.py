@@ -15,7 +15,9 @@ steps on each person, in this order:
    so a track has holes. Short holes (``max_gap`` frames or fewer) are linearly
    interpolated; longer ones hold the last value. ``TrackData.valid`` is False on
    every filled-in frame so downstream code can tell real data from guesses.
-   The time stamps are the exception: time is linear in the frame number, so
+   The rig's angles (``mhr_params[3:130]``) are interpolated the short way
+   round, so a hole across a +-pi wrap does not spin the body. The time
+   stamps are the exception: time is linear in the frame number, so
    they are interpolated whatever the length of the hole. (The tracker that
    gives out ids retires a person after ``max_gap`` missed frames, so from the
    demo a longer hole arrives as a new track rather than as a held pose.)
@@ -39,10 +41,11 @@ steps on each person, in this order:
    :func:`estimate_floor`). A camera on a shelf or a tripod usually looks down
    a little, and in the camera's frame the floor is then a slope: far feet sit
    higher than near ones, so one floor height would be wrong for most of the
-   clip and a walking person would sink into the ground. When the people
-   covered at least a metre of depth, the slope of the lowest foot keypoint
-   against depth gives the camera's pitch and the whole world is rotated back
-   level; with less depth the slope is noise, and the camera is assumed level.
+   clip and a walking person would sink into the ground. When a person
+   covered at least a metre of depth (5th to 95th percentile), the slope of
+   the lowest foot keypoint against depth gives the camera's pitch and the
+   whole world is rotated back level; with less depth the slope is noise, and
+   the camera is assumed level.
    Then one floor height for the whole clip: the 5th percentile, over all
    tracks and valid frames, of the lowest foot keypoint. A percentile rather
    than the minimum so that one bad frame cannot sink the floor. Subtracting
@@ -62,7 +65,9 @@ steps on each person, in this order:
    one plant to the next would add the model's height error at every plant to
    a running sum that never decays, and the body would float away from the
    floor it was just put on. The per-frame shift is kept in
-   ``TrackData.root_offset`` so the correction is always recoverable.
+   ``TrackData.root_offset`` so the correction is always recoverable. This
+   step needs step 4: "standing on the floor" means y near 0, so with
+   ``floor=False`` it is off too.
 
 Coordinate frames in :class:`TrackData`:
 
@@ -115,7 +120,7 @@ _FEET = (FOOT_NODES["left"], FOOT_NODES["right"])
 class TrackData:
     """One person's clip after processing. ``N`` frames, consecutive."""
 
-    track_id: int
+    track_id: int             # 0, 1, ... in order of first appearance
     frames: np.ndarray        # (N,) int64, ORIGINAL frame numbers, steps of frame_step
     times: np.ndarray         # (N,) float64 seconds
     valid: np.ndarray         # (N,) bool, False on frames that were filled in
@@ -239,14 +244,28 @@ def estimate_pitch(
     straight-line fit of the lowest foot keypoints gives the slope, refitted
     once without the points more than 5 cm above the line (feet in the air).
     Only pitch is estimated, not roll: a camera on a shelf or a tripod is
-    tilted down, not sideways. Only a track that itself spans at least
-    ``min_depth_range`` metres of depth takes part, and the result is 0.0 when
-    none does: a person standing still gives a slope that is all noise, two
-    people standing at different depths give none at all, and a level camera
-    is the safer assumption.
+    tilted down, not sideways. Only a track whose own points span at least
+    ``min_depth_range`` metres between the 5th and 95th percentile of depth
+    takes part, and the result is 0.0 when none does: a person standing still
+    gives a slope that is all noise, two people standing at different depths
+    give none at all, and a level camera is the safer assumption.
+
+    Percentiles, not the minimum and maximum, and only the points between
+    them enter the fit: a depth error moves a person ALONG the camera ray,
+    which in the (z, y) plane is itself a slope. With max - min, one frame
+    whose depth is badly wrong (a person half out of the picture at the start
+    of a track) opens the gate for a standing person, and as the one far-off
+    point it then decides the slope of the whole fit: one frame 1.3x too far
+    among 300 of a person standing still read as a camera pitched 17 degrees.
     """
-    points = [_lowest_foot_points(j, v) for j, v in zip(joints_world_list, valid_list)]
-    points = [p for p in points if len(p) > 1 and np.ptp(p[:, 2]) >= min_depth_range]
+    points = []
+    for j, v in zip(joints_world_list, valid_list):
+        p = _lowest_foot_points(j, v)
+        if len(p) < 2:
+            continue
+        lo, hi = np.percentile(p[:, 2], [5, 95])
+        if hi - lo >= min_depth_range:
+            points.append(p[(p[:, 2] >= lo) & (p[:, 2] <= hi)])
     if not points:
         return 0.0
     points = np.concatenate(points)
@@ -272,19 +291,24 @@ def _foot_positions(joints: np.ndarray) -> np.ndarray:
 
 def _foot_speeds(feet: np.ndarray, fps: float) -> np.ndarray:
     """``(N, 2)`` speed in m/s of each foot, as a central difference over
-    +-2 frames (one-sided at the ends of the clip).
+    +-1/15 s: +-2 samples at 30 fps, +-4 at 60, +-1 at 22 fps or less
+    (one-sided at the ends of the clip).
 
     Not over one frame: the per-frame jitter of ``cam_trans`` reads as a speed
     that grows with the frame rate -- 1 cm of white jitter is 0.6 m/s at 30 fps
     and 0.85 m/s at 60 fps, above ``speed_thresh`` -- so no foot would ever
     count as planted on exactly the input the anchoring exists for. Over four
     frames the same jitter reads as a quarter of that, while a real, steady
-    motion reads the same either way.
+    motion reads the same either way. And fixed in time, not in samples: at
+    10 fps (a security camera, or ``--frame-skip 3``) +-2 samples is 0.4 s,
+    as long as a whole stance, so near both ends of every stance the window
+    reaches into the swing, the plant left over is shorter than
+    ``min_frames`` and is erased, and the anchoring silently does nothing.
     """
     n = len(feet)
     speed = np.zeros(feet.shape[:2])
     if n > 1:
-        k = min(2, n - 1)
+        k = min(max(1, round(fps / 15.0)), n - 1)
         i = np.arange(n)
         hi, lo = np.minimum(i + k, n - 1), np.maximum(i - k, 0)
         speed = np.linalg.norm(feet[hi] - feet[lo], axis=-1) * fps / (hi - lo)[:, None]
@@ -402,13 +426,15 @@ def write_json(path: str | Path, tracks: Sequence[TrackData], meta: dict) -> Non
         "num_frames": meta["num_frames"],
         "units": "metres",
         "coordinate_system": {
-            "joints_world": "X right, Y up, Z towards the camera; floor at y=0",
+            "joints_world": "X right, Y up, Z horizontal towards the camera; rotated "
+                            "about X by -camera_pitch_deg to level the floor; floor at y=0",
             "joints_cam": "camera frame, X right, Y down, Z forward (OpenCV)",
             "joints_2d": "pixels, origin top-left",
         },
         "joint_names": list(NODE_NAMES),
         "parents": list(PARENTS),
         "floor_y": meta["floor_y"],
+        "camera_pitch_deg": meta["camera_pitch_deg"],
         "footlock": meta["footlock"],
         "tracks": [],
     }
@@ -449,6 +475,7 @@ def write_npz(path: str | Path, tracks: Sequence[TrackData], meta: dict) -> None
         "fps": np.float64(meta["fps"]),
         "frame_step": np.int64(meta["frame_step"]),
         "floor_y": np.float64(meta["floor_y"]),
+        "camera_pitch_deg": np.float64(meta["camera_pitch_deg"]),
         "joint_names": np.array(NODE_NAMES),
         "parents": np.asarray(PARENTS, dtype=np.int64),
         "track_ids": np.array([t.track_id for t in tracks], dtype=np.int64),
@@ -491,6 +518,7 @@ class MocapRecorder:
         frame_step: pushed frame numbers advance by this much (the demo pushes
             0, 2, 4, ... with ``--frame-skip 2``).
         footlock: anchor the root motion with the feet (step 5 above).
+            Only with ``floor``, which it needs.
         floor: estimate the floor and move it to y = 0 (step 4 above).
         max_gap: longest run of missing frames that is interpolated; longer
             gaps hold the last value.
@@ -509,7 +537,9 @@ class MocapRecorder:
                  floor: bool = True, max_gap: int = 10, min_frames: int = 2):
         self.fps = fps
         self.frame_step = int(frame_step)
-        self.footlock = footlock
+        # planted_feet's height test needs the floor at y = 0; without the
+        # floor step y = 0 is the camera's height and a lifted foot "stands".
+        self.footlock = footlock and floor
         self.floor = floor
         self.max_gap = int(max_gap)
         self.min_frames = int(min_frames)
@@ -593,11 +623,22 @@ class MocapRecorder:
                       if name not in ("times", "contact")}
             if all(c is not None for c in rec["contact"][:n]):
                 arrays["contact"] = np.stack(rec["contact"][:n])
+            order = np.argsort(pushed, kind="stable")
+            # mhr_params[3:130] are angles in radians (root Euler, then the
+            # joint angles), so a hole is filled the short way round: with its
+            # back to the camera a person's root angles sit at +-pi and flip
+            # sign from frame to frame, and interpolated one number at a time
+            # the filled frames would spin half a turn and back. Only the
+            # filled rows are replaced, so the pushed ones stay bit-identical.
+            angles = arrays["mhr_params"][:, 3:130].astype(np.float64)
+            angles[order] = np.unwrap(angles[order], axis=0)
             samples, arrays, valid = fill_gaps(pushed, arrays, self.max_gap)
+            a = fill_gaps(pushed, {"a": angles}, self.max_gap)[1]["a"]
+            a -= 2 * np.pi * np.round(a / (2 * np.pi))          # back into [-pi, pi]
+            arrays["mhr_params"][~valid, 3:130] = a[~valid]
             # Time is linear in the frame number, so a hole's time stamps are
             # interpolated whatever its length: fill_gaps would hold the last
             # stamp over a long hole, and time must keep advancing.
-            order = np.argsort(pushed, kind="stable")
             arrays["times"] = np.interp(
                 samples, pushed[order], np.asarray(rec["times"][:n], dtype=np.float64)[order])
 
@@ -621,14 +662,17 @@ class MocapRecorder:
                 w[5][..., 1] -= self.floor_y
 
         tracks = []
-        for track_id, samples, valid, arrays, joints_cam, joints_world, lengths in working:
+        for _, samples, valid, arrays, joints_cam, joints_world, lengths in working:
             contact = arrays.get("contact")
             if self.footlock:
                 joints_world, offset = anchor_root(joints_world, self.fps, contact)
             else:
                 offset = np.zeros((len(samples), 3))
             tracks.append(TrackData(
-                track_id=track_id,
+                # 0, 1, ... in order of appearance, not the tracker's id: that
+                # also counted the short detections dropped above, and the
+                # guide promises the first person is track0.
+                track_id=len(tracks),
                 frames=samples * self.frame_step,
                 times=arrays["times"],
                 valid=valid,
@@ -723,6 +767,7 @@ class MocapRecorder:
         prefix = Path(prefix)
         meta = {"fps": float(self.fps), "frame_step": self.frame_step,
                 "num_frames": self._last_frame + 1, "floor_y": float(self.floor_y),
+                "camera_pitch_deg": float(self.camera_pitch_deg),
                 "footlock": bool(self.footlock)}
         written: list[Path] = []
         if "json" in formats:

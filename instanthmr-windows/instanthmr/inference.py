@@ -87,8 +87,11 @@ class HMRPrediction:
             supplied, else the diagonal stand-in ``_focal_px`` picks.
         principal_point: (2,) [cx, cy] = full-frame centre.
         image_shape: (H, W) of the source frame.
-        mhr_params: (204,) MHR pose parameters (34 joints × 6-D rotation).
-            Pass to ``instanthmr.mhr_renderer.MHRRenderer.forward()``
+        mhr_params: (204,) the MHR rig's native parameters: ``0:3`` root
+            translation (always 0; ``cam_trans`` places the person), ``3:6``
+            root rotation (extrinsic-XYZ Euler, radians), ``6:130`` joint
+            angles (radians), ``130:136`` bone length / width, ``136:204``
+            bone scales. Pass to ``instanthmr.mhr_renderer.MHRRenderer.forward()``
             together with ``shape_params`` to obtain a full body mesh.
         shape_params: (45,) MHR identity blend-shape coefficients
             (20 body + 20 head + 5 hand). Pair with ``mhr_params`` and

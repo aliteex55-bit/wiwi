@@ -5,8 +5,11 @@ This folder is upstream InstantHMR
 `UPSTREAM_COMMIT.txt`) with `.git` removed and a thin Windows layer on top.
 Apart from `instanthmr/detector.py` (see the rfdetr bullet below) and the
 motion-capture layer (its own section below: three new modules, four new
-`demo.py` flags, a `track_id` field), nothing under `instanthmr/`, `demo.py`,
-`tools/`, training or benchmark code was touched.
+`demo.py` flags, a `track_id` field in `inference.py` stamped by
+`smoothing.py`, a 1euro counter fix in `smoothing.py`, the exports in
+`__init__.py`, a corrected `mhr_params` docstring in `inference.py`, and a
+change to how `pipeline.py` re-uses the last box), nothing under
+`instanthmr/`, `demo.py`, `tools/`, training or benchmark code was touched.
 
 ## Changes to upstream files
 
@@ -222,7 +225,12 @@ cleaned skeleton animation per person and writes it to files.
   min_frames=2)`. `push(frame_idx, timestamp, persons)` once per processed
   frame; `finish()` then runs, per person, in this order: **gap fill** (holes
   of <= `max_gap` samples linearly interpolated, longer ones hold the last
-  value, `TrackData.valid` False on filled samples; the time stamps are
+  value, `TrackData.valid` False on filled samples; the rig's angles
+  `mhr_params[3:130]` are filled the short way round (`np.unwrap` over the
+  pushed samples first, only the filled rows replaced, so the pushed ones
+  stay bit-identical: frames 2.8 deg apart across the +-pi wrap of a person
+  with their back to the camera were filled 72 / 143 / 145 / 74 deg away
+  before); the time stamps are
   interpolated over any hole, since time is linear in the frame number;
   tracks with fewer than `min_frames` complete frames are dropped - a
   detector false positive is one or two frames long - and a push torn by a
@@ -233,17 +241,28 @@ cleaned skeleton animation per person and writes it to files.
   has ONE length per bone) -> **floor** (`estimate_pitch`: the camera's pitch
   from a straight-line fit of the lowest foot keypoint's height against depth
   z, refitted once without points more than 5 cm above the line, undone by a
-  rotation about x of every track; skipped, and the camera assumed level,
-  when the points span less than 1 m of depth, where the slope is noise - a
-  standing person gets no correction; then one clip-wide 5th percentile of
-  the lowest foot keypoint over all tracks, subtracted so the floor is y = 0;
+  rotation about x of every track; a track takes part only when its points
+  span 1 m or more between the 5th and 95th percentile of depth, and only
+  its points in that range are fitted - with max - min, one frame 1.3x too
+  far in depth opened the gate for a standing person and, as the one
+  far-off point, made a level camera read as pitched 17 deg (3.9 deg with a
+  second person standing nearer); with no such track the camera is assumed
+  level, since a standing person's slope is noise; then one clip-wide 5th
+  percentile of the lowest foot keypoint over all tracks, subtracted so the
+  floor is y = 0;
   a percentile so one bad frame cannot sink it) -> **foot anchoring** (a foot
   is "planted" when its speed is below 0.35 m/s and its height below 0.10 m,
   with hysteresis x1.5 and a 3-frame minimum, or `contact_prob > 0.5` when
-  the graph has it; the speed is a +-2 frame central difference, because
-  over one frame 1 cm of white jitter reads as 0.6 m/s at 30 fps and 0.85 at
-  60 fps and no foot would ever plant; a running root offset in x and z keeps
-  every planted foot at its locked output position, is held while no foot is
+  the graph has it; the speed is a central difference over +-1/15 s (+-2
+  samples at 30 fps, +-4 at 60, +-1 at 22 fps or less), because over one
+  frame 1 cm of white jitter reads as 0.6 m/s at 30 fps and 0.85 at 60 fps
+  and no foot would ever plant, and fixed in time because a +-2 sample
+  window is 0.4 s at 10 fps (`--frame-skip 3`, security cameras), as long as
+  a stance, and planted 1% of a walk's foot-frames there instead of 40%;
+  only with the floor step, which its height test needs (`--no-floor` turns
+  it off: with y = 0 at the camera's height every foot was "low" and a foot
+  lifted slowly dragged the body 15 cm); a running root offset in x and z
+  keeps every planted foot at its locked output position, is held while no foot is
   planted, and is re-locked whenever the planted set changes so it never
   jumps; y is never anchored, because a held y offset adds each plant's
   start-minus-end height error to a sum that never decays and floats the
@@ -255,7 +274,14 @@ cleaned skeleton animation per person and writes it to files.
   `report()` prints the numbers (tracks, floor, root movement and
   planted-foot speed before -> after, `check_finger_order`); `export(prefix,
   formats)` writes `<prefix>.mocap.json`, `<prefix>.mocap.npz`,
-  `<prefix>.track<id>.csv`, `<prefix>.track<id>.bvh`.
+  `<prefix>.track<id>.csv`, `<prefix>.track<id>.bvh`. The exported ids are
+  0, 1, ... in order of first appearance (not the tracker's ids, which also
+  count the dropped short detections), so the first person is always
+  `track0`. JSON and NPZ carry `camera_pitch_deg` next to `floor_y`, so
+  `joints_world` can be related back to the camera: `to_world(joints_cam)`
+  = `(joints_world - root_offset + [0, floor_y, 0]) @ R`, with `R =
+  mocap._rotation_about_x(-radians(camera_pitch_deg))`, up to the
+  bone-length normalisation.
 - `bvh.py` - `write_bvh(path, names, parents, rest_offsets, positions, fps,
   scale=100)`: positions in, rotations out, because a BVH file stores bone
   lengths once (`OFFSET`) and directions per frame as rotations. Per joint,
@@ -266,7 +292,18 @@ cleaned skeleton animation per person and writes it to files.
   cm forearm (with 1 cm noise, equal weights put fingertips up to 20 cm off,
   length weights 8 cm); a **chain** joint (one child) gets the smallest swing
   taking the parent-rotated rest direction onto the current one, twist
-  inherited from the parent; a **leaf** inherits its parent's rotation. The
+  inherited from the parent; a **leaf** inherits its parent's rotation. One
+  rotation cannot place children whose relative directions differ from the
+  rest ones (a hand-written T-pose is not the subject's anatomy, and a head
+  turn or a side bend moves fork children against each other), so
+  `write_bvh` adds a zero-`OFFSET` joint `<fork>_to_<child>` per child of
+  every fork (36, so the file has 107 joints) and the fork's Kabsch fit looks
+  through them: every bone gets its own rotation and length-normalised input
+  round-trips exactly (before: 3.8 cm max with bones 10 deg off the rest
+  directions, 6.1 cm on a 60 deg head turn, planted feet bobbing 3.2 cm on a
+  torso sway; after: 0.00000 cm). Blender's importer lengthens the
+  zero-length bone each fork joint is left with (it continues its parent
+  bone). The
   local rotation `G_parent^T @ G` is written as ZXY Euler degrees (`CHANNELS 3
   Zrotation Xrotation Yrotation`, the root also `Xposition Yposition
   Zposition`), offsets and positions x100 = centimetres, every leaf gets an
@@ -277,8 +314,13 @@ cleaned skeleton animation per person and writes it to files.
 
 Flags: `--export PREFIX` (for a video `--export C:/clips/dance` puts the files
 next to the clip; a folder, an empty name or a missing parent folder is
-rejected in `parse_args`, before any model loads), `--export-formats
-json,npz,csv,bvh` (validated there too), `--no-footlock`, `--no-floor`.
+rejected in `parse_args`, before any model loads - except a folder that is
+the source's own path without its extension, which is what the .bat passes
+and does not collide with the files; an existing `PREFIX.*` .csv / .bvh /
+.json / .npz that cannot be opened for appending, i.e. one Excel has open,
+is rejected there too), `--export-formats
+json,npz,csv,bvh` (validated there too), `--no-footlock`, `--no-floor` (also
+turns off the pitch levelling and the foot anchoring).
 `demo.MAX_GAP` (10) is passed both as the smoother's tracker `max_age` and as
 the recorder's `max_gap`, so every hole the tracker bridges is one the
 recorder interpolates (the defaults were 5 and 10: a 6-10 frame blink split
@@ -288,13 +330,21 @@ person who leaves the picture ends their track instead of producing a
 confident-looking skeleton of an empty crop until the end of the clip.
 `build_recorder()` makes the `MocapRecorder`, `export_mocap()` runs
 finish / report / export and prints the paths under `motion capture
-written:`. Video: the recorder gets `fps / frame_skip` and `frame_step =
-frame_skip`, `emit()` pushes `(frame_idx, frame_idx / fps)` after
-`viz.log_frame`, and the export runs after the smoother flush (the centred
-filter holds 2 frames back) and also after Ctrl+C. Camera: `fps=None` (the
+written:`; it writes one format at a time and goes on after an `OSError`
+(printed as `[error] could not write the .csv file(s): ...`, run exits 1), so
+a .csv locked by Excel no longer costs the .bvh written after it. Video: the
+recorder gets `fps / frame_skip` and `frame_step = frame_skip`, `emit()`
+pushes `(frame_idx, frame_idx / fps)` before `viz.log_frame` (so a viewer or
+mesh-render error does not drop the frame from the export), and the export
+runs after the smoother flush (the centred filter holds 2 frames back) and
+also after Ctrl+C. The flush has its own `try`: the error that ended the
+loop often comes back there (a lost GPU, a viewer failing on every frame,
+the same bad frame inside the centred window), and it used to escape
+`run_video` with nothing exported. Camera: `fps=None` (the
 recorder measures 1 / median dt from the pushed timestamps, which are
 `time.perf_counter() - t_start`, so the exported times start at 0 like a
-video's), export after the `try` block, so Ctrl+C - the only way a camera run
+video's; pushed before `viz.log_frame`, as in the video loop), export after
+the `try` block, so Ctrl+C - the only way a camera run
 ends - still writes the files. Any other exception inside either loop is
 printed with its traceback, the export still runs, and the function then
 exits with code 1 (so the .bat reaches `:failed`): on a CPU a run takes 5-15x
@@ -308,25 +358,50 @@ prediction it emits, so with `--smoothing-filter` the recorder files
 predictions under the smoother's ids. Without the smoother they carry `None`
 and the recorder builds its own `smoothing._Tracker` on first use and calls
 it on every push so stale tracks age out. A mixed stream (some stamped, some
-not) is not expected; both id spaces start at 0 and could collide.
+not) is not expected; both id spaces start at 0 and could collide. In 1euro
+mode `push()` now counts a frame only after `_one_euro` returns: counted
+first, an exception inside it left `n_pushed = n_emitted + 1`, and the
+`flush()` after the error raised `IndexError: deque index out of range`,
+hiding the real error and losing the export.
 
 `export_mocap.bat`: `record_video.bat`'s structure and guards, running
-`demo.py --video "%INPUT%" ... --smoothing-filter --smoothing-mode centered
+`demo.py %SRC% "%INPUT%" ... --smoothing-filter --smoothing-mode centered
 --detector-stride %STRIDE% --no-spawn --save-rrd "%~dpn1.rrd" --export
 "%~dpn1" %MHR%` with `STRIDE=1` on `DEVICE=cuda` or `DETECTOR=medium` (the card runs the detector)
 and 2 otherwise. Centred
 rather than 1euro because the clip is offline: the 2-frame lookahead costs
 nothing and has no lag, while 1euro's heavy rest-time smoothing would
-round off slow motion in the file. Afterwards it lists `dir /b
-"%~dp1%~n1.*"`, prints the Blender import steps and opens the `.rrd` in
-`.venv\Scripts\rerun.exe`.
+round off slow motion in the file. `SRC` is `--image` for .jpg / .jpeg /
+.png / .bmp / .webp and `--video` otherwise: read as a video a photo is one
+frame, below the recorder's `min_frames=2`, so it used to end in "no person
+was tracked". Afterwards, if `%PREFIX%.track0.bvh` exists, it points to the
+`motion capture written:` list (in `OUTDIR`, captured before the `cd`;
+`dir /b` used to list the bundle folder for a relative argument, and stale
+files of earlier runs), prints the Blender import steps and opens the `.rrd`
+in `.venv\Scripts\rerun.exe`; without it, `:no_person` says no person was
+found.
 
 ### Verified here (Linux, 4 CPUs, no GPU, no real weights)
 
-- `python -m pytest tests -q`: 45 passed (27 in `test_mocap.py`, 8 in
-  `test_bvh.py`, 4 in `test_smoothing.py`, 4 in `test_demo.py` with the
+- `python -m pytest tests -q`: 60 passed (33 in `test_mocap.py`, 9 in
+  `test_bvh.py`, 5 in `test_smoothing.py`, 11 in `test_demo.py` with the
   models and `cv2.VideoCapture` stubbed, 2 in `test_pipeline.py` with stub
-  models), synthetic skeletons with known truth.
+  models), synthetic skeletons with known truth. Every round-2 code fix has a
+  test that fails on the code before it.
+- Review round 2, on the reviewer's simulations: BVH vs input with exact
+  bone lengths, see the `bvh.py` bullet (0.00000 cm on every pose after the
+  fix); pitch, two people standing with one to ten frames of person A 1.3x
+  too far: -3.9 deg and A's feet 13.7 cm above the floor before, 0.0 deg and
+  0.5 cm after; a 1.5 m walk under a 10 deg pitch: 10.0 deg (1% depth
+  jitter) and 9.8 deg (4%), before 9.9 / 9.6; the walk sampled at 30 / 15 /
+  10 / 7.5 fps: planted 0.40 / 0.40 / 0.40 / 0.19 of foot-frames (truth
+  0.50; before 0.40 / 0.33 / 0.01 / 0.00), and the round-1 walk at 60 fps
+  with 0.5 / 1.0 / 1.5 cm jitter 0.41 / 0.41 / 0.40 (before 0.45 / 0.35 /
+  0.08, so 1.5 cm at 60 fps is no longer lost); the reviewer's failure harnesses
+  (viewer failing from emitted frame 3 with and without smoothing, one bad
+  frame in centered and 1euro mode, RF-DETR nano with the viewer failing
+  from frame 10) now all write their files and exit 1 - before, the
+  smoothed ones escaped with a traceback and wrote nothing.
 - Review round 1, on the reviewer's own simulations (scripts not shipped):
   a 25 fps track with a 17-frame hole exports times 0.00, 0.04, ... 0.88
   (they froze at 0.08 for the hole before); a clean 30 fps gait with +-2 cm
@@ -341,25 +416,26 @@ round off slow motion in the file. Afterwards it lists `dir /b
 - End to end: `demo.py --video` on a 30-frame 1280x497 clip of a real person
   with RF-DETR nano and a stand-in ONNX graph (real input/output names and
   shapes, constant outputs; `joints_3d` is `uniform(-0.6, 0.6)` noise) with
-  `--smoothing-filter --smoothing-mode centered --export`: 8.4 fps, `mocap: 2
+  `--smoothing-filter --smoothing-mode centered --export`: 10.3 fps, `mocap: 2
   track(s)` (the second: 15 real + 15 filled frames of a low-confidence
   detection, now reported with `may be a false detection, not a person`),
   `camera pitch not measured`, all six files written - `clip.mocap.json`
-  453,047 B, `clip.mocap.npz` 109,392 B, `clip.track0.csv` 60,219 B,
-  `clip.track1.csv` 58,096 B, `clip.track{0,1}.bvh` ~75,100 B each - and
+  453,140 B, `clip.mocap.npz` 109,597 B, `clip.track0.csv` 60,219 B,
+  `clip.track1.csv` 58,096 B, `clip.track{0,1}.bvh` ~113,340 B each - and
   exit code 0. The same clip followed by 30 black frames (the person leaves):
   `track 0: frames 0-29` and `num_frames` 60; before the pipeline fix the
   track ran to frame 59 with 30 confident "valid" frames of an empty crop.
-- The written BVH read back with `read_bvh()`: 71 joints, 30 frames, frame
-  time 0.0667 s (the clip is 15 fps), `fk()` reproduces the root exactly. On
-  the stand-in the other joints are up to 169 cm off, and that is the
-  stand-in, not the writer: its sibling bones at a fork are not a rigid
-  rotation of the rest pose (angle neck->nose / neck->left_shoulder 25 deg
-  vs 99 deg in the T-pose), so no rotation fits. The same recorder -> export
-  -> `read_bvh` -> `fk` round trip on a plausible synthetic human (T-pose
-  lengths, a swinging arm, a bending knee, 4 mm per-axis jitter, 60 frames):
-  max 5.5 cm, mean 0.8 cm against `joints_world`, and `joints_world` itself is
-  within 3.0 cm max / 0.9 cm mean of the noise-free truth.
+- The written BVH read back with `read_bvh()`: 107 joints (71 + 36 fork
+  joints), 30 frames, frame time 0.0667 s (the clip is 15 fps), and `fk()`
+  reproduces every one of the 71 nodes of `joints_world` to 0.00005 cm -
+  also on the stand-in, whose fork children are nothing like a rotation of
+  the rest pose (angle neck->nose / neck->left_shoulder 25 deg vs 99 deg in
+  the T-pose; 169 cm off before the fork joints). An independent parser with
+  its own forward kinematics (`bvhio` 1.5.4) agrees to 0.00012 cm, and the
+  20tab `bvh` parser reads the same 107 joints and parents.
+- `demo.py --image` on a single frame with `export_mocap.bat`'s flags and a
+  folder of the photo's name beside it: two one-frame tracks, all six files,
+  exit code 0.
 - `demo.py --help` lists the four flags; `--export-formats json,xyz` exits
   with `unknown format(s) xyz; choose among json, npz, csv, bvh` before any
   model loads.
@@ -378,7 +454,9 @@ round off slow motion in the file. Afterwards it lists `dir /b
   PyPI parser (same joints, offsets, parents, channel lists and values), the
   Blender axis statement in `GUIDE_WINDOWS.md` (file +Z = Blender -Y with the
   importer's default `-Z forward, Y up`) is from the importer's documented
-  defaults, not from a run.
+  defaults, not from a run; so is the statement that it gives each
+  zero-length fork bone its parent bone's vector (`import_bvh.py`'s
+  zero-length-bone branch).
 - `export_mocap.bat` on Windows (no cmd.exe here).
 
 ### Limitations

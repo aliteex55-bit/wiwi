@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+import glob
 import sys
 import time
 import traceback
@@ -256,7 +257,9 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--no-floor", action="store_true",
-        help="Do not shift the skeleton so that the floor is y=0 (--export only).",
+        help="Do not shift the skeleton so that the floor is y=0; also turns off "
+             "the camera-pitch levelling and the foot anchoring, which need to "
+             "know where the floor is (--export only).",
     )
 
     args = p.parse_args()
@@ -270,10 +273,25 @@ def parse_args() -> argparse.Namespace:
         p.error("--frame-skip must be >= 1")
     if args.export is not None:
         prefix = Path(args.export)
-        if not prefix.name or args.export.endswith(("/", "\\")) or prefix.is_dir():
+        # export_mocap.bat passes the video's own path without its extension;
+        # a folder of that name beside the video does not collide with the
+        # files (dance.mocap.json goes next to the folder dance, not in it).
+        source = args.video or args.image
+        beside_source = source is not None and Path(source).with_suffix("") == prefix
+        if (not prefix.name or args.export.endswith(("/", "\\"))
+                or (prefix.is_dir() and not beside_source)):
             p.error("--export needs a file-name prefix, e.g. C:/clips/dance, not a folder")
         if not prefix.parent.is_dir():
             p.error(f"--export: folder does not exist: {prefix.parent}")
+        # Windows will not let anyone overwrite a file Excel has open: find
+        # that out now, not after the whole clip has been processed.
+        for f in prefix.parent.glob(glob.escape(prefix.name) + ".*"):
+            if f.suffix in (".csv", ".bvh", ".json", ".npz"):
+                try:
+                    open(f, "a").close()
+                except OSError:
+                    p.error(f"--export: cannot write {f} - is it open in Excel or another "
+                            "program? Close it and run again.")
     elif args.no_footlock or args.no_floor or args.export_formats != list(EXPORT_FORMATS):
         print("[warn] --export-formats / --no-footlock / --no-floor do nothing without --export")
     return args
@@ -509,18 +527,32 @@ def build_recorder(args: argparse.Namespace, fps: float | None, frame_step: int 
                          floor=not args.no_floor, max_gap=MAX_GAP, **kwargs)
 
 
-def export_mocap(recorder: MocapRecorder, args: argparse.Namespace) -> None:
+def export_mocap(recorder: MocapRecorder, args: argparse.Namespace) -> bool:
     """Clean up the recorded tracks, print the recorder's report and write the
-    files. Called once per run, after the LAST frame has been pushed."""
+    files. Called once per run, after the LAST frame has been pushed. Returns
+    False if a file could not be written.
+
+    One format at a time, and on to the next after an error: a .csv that is
+    open in Excel cannot be overwritten, and that must not also cost the
+    .bvh, the file the user actually wants."""
     recorder.finish()
     print("\n" + recorder.report())
     print("writing files (about 10 s per minute of video) ...", flush=True)
-    paths = recorder.export(args.export, args.export_formats)
+    paths, ok = [], True
+    for fmt in args.export_formats:
+        try:
+            paths += recorder.export(args.export, [fmt])
+        except OSError as e:
+            print(f"[error] could not write the .{fmt} file(s): {e}\n"
+                  "        If it is open in Excel or another program, close it; if the drive is\n"
+                  "        full, free some space. Then run again.", flush=True)
+            ok = False
     print("motion capture written:")
     for path in paths:
         print(f"  {path}")
     if not paths:
         print("  (none)")
+    return ok
 
 
 def run_image(args: argparse.Namespace) -> None:
@@ -554,7 +586,8 @@ def run_image(args: argparse.Namespace) -> None:
     recorder = build_recorder(args, fps=None, min_frames=1)
     if recorder is not None:
         recorder.push(0, 0.0, result.persons)
-        export_mocap(recorder, args)
+        if not export_mocap(recorder, args):
+            sys.exit(1)
 
 
 def run_video(args: argparse.Namespace) -> None:
@@ -590,6 +623,10 @@ def run_video(args: argparse.Namespace) -> None:
 
     def emit(persons) -> None:
         f_idx, f_rgb, d_ms, h_ms, t_ms = pending.popleft()
+        # Recorded first, so a viewer or mesh-render error on this frame does
+        # not also drop it from the export.
+        if recorder is not None:
+            recorder.push(f_idx, f_idx / fps, persons)
         render_times.append(viz.log_frame(
             f_rgb, persons,
             frame_idx=f_idx,
@@ -598,8 +635,6 @@ def run_video(args: argparse.Namespace) -> None:
             hmr_ms=h_ms,
             total_ms=t_ms,
         ))
-        if recorder is not None:
-            recorder.push(f_idx, f_idx / fps, persons)
 
     try:
         while True:
@@ -654,16 +689,23 @@ def run_video(args: argparse.Namespace) -> None:
         # Drain the delay line here, after the loop, so Ctrl+C does not drop
         # the last (window-1)//2 frames: they were processed and belong in the
         # recording and the export.
-        for smoothed in smoother.flush():
-            emit(smoothed)
+        try:
+            for smoothed in smoother.flush():
+                emit(smoothed)
+        except Exception:
+            # The error that ended the loop can come back here -- a lost GPU,
+            # a viewer that fails on every frame, the same bad frame inside
+            # the centred window -- and the export below must still run.
+            traceback.print_exc()
+            failed = True
         report = smoother.jitter_report()
         if report:
             print("\n" + report)
 
     # After the smoother flush, so the frames it held back are in; also after
     # Ctrl+C, so an interrupted run still yields what was captured so far.
-    if recorder is not None:
-        export_mocap(recorder, args)
+    if recorder is not None and not export_mocap(recorder, args):
+        failed = True
 
     if tot_times:
         # Skip the first frame from the average — it bears the warm-up cost.
@@ -727,6 +769,8 @@ def run_camera(args: argparse.Namespace) -> None:
                 # interval that actually elapsed.
                 persons = smoother.push(persons, timestamp=elapsed) or persons
 
+            if recorder is not None:   # before the viewer, as in run_video
+                recorder.push(frame_idx, elapsed, persons)
             render_ms = viz.log_frame(
                 rgb, persons,
                 frame_idx=frame_idx,
@@ -736,8 +780,6 @@ def run_camera(args: argparse.Namespace) -> None:
                 total_ms=result.total_ms,
             )
             render_times.append(render_ms)
-            if recorder is not None:
-                recorder.push(frame_idx, elapsed, persons)
 
             if frame_idx and frame_idx % 30 == 0:
                 _print_timings(
@@ -758,8 +800,8 @@ def run_camera(args: argparse.Namespace) -> None:
         cap.release()
 
     # Ctrl+C is how a camera run ends, so the files are written here, after it.
-    if recorder is not None:
-        export_mocap(recorder, args)
+    if recorder is not None and not export_mocap(recorder, args):
+        failed = True
     if failed:
         sys.exit(1)
 
