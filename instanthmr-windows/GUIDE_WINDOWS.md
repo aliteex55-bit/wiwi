@@ -8,7 +8,9 @@ tool. It first finds the people in the picture with a detector (RF-DETR), then
 estimates each person's 3D pose with the InstantHMR model, and shows the result
 in a 3D viewer called Rerun: the original picture with the skeleton drawn on it,
 the skeleton in 3D that you can rotate with the mouse, and a small speed graph.
-Optionally it can also draw the full body surface (a "mesh") over the skeleton.
+Optionally it can also draw the full body surface (a "mesh") over the skeleton,
+and it can write the motion of a video as animation files for Blender (see
+"Motion capture files" below).
 
 This folder is a ready-to-use bundle. You do not need to type any code: you
 double-click one file to install, and drag files onto other files to run.
@@ -16,7 +18,8 @@ double-click one file to install, and drag files onto other files to run.
 ## What you need
 
 - Windows 10 or 11, 64-bit.
-- Python 3.12 (3.11 also works; NOT 3.13 or 3.14). Free, see Step 1 below.
+- Python 3.12, 64-bit (3.11 also works; NOT 3.13 or 3.14). Free, see Step 1
+  below.
 - The Microsoft Visual C++ runtime (free, 25 MB). Most PCs already have it.
   Setup checks for it; if it is missing, install it from
   https://aka.ms/vs/17/release/vc_redist.x64.exe (run it, click **Install**,
@@ -54,7 +57,8 @@ Tips before you start:
 
 ## Step 0 - unpack the bundle
 
-You received a `.zip` file. Windows can look inside a zip without unpacking
+You received a `.zip` file (if it came by e-mail or as a download link, it is
+in your Downloads folder). Windows can look inside a zip without unpacking
 it, but the scripts only work from a real folder:
 
 1. Right-click the zip file, choose **Properties**, tick **Unblock** at the
@@ -62,8 +66,9 @@ it, but the scripts only work from a real folder:
    about every file inside.
 2. Right-click the zip again, choose **Extract All...**, type a simple
    destination such as `C:\InstantHMR`, click **Extract**.
-3. Open the extracted folder. You must see `setup_windows.bat`, `demo.py` and a
-   `models` folder next to each other. Everything below happens in this folder.
+3. Open the extracted folder. If it contains just one folder, open that one
+   too. You must see `setup_windows.bat`, `demo.py` and a `models` folder next
+   to each other. Everything below happens in this folder.
 
 If you skip this and double-click a script inside the zip, Windows quietly
 copies only that one file to a temporary folder and runs it there; the script
@@ -84,14 +89,16 @@ notices and stops with `demo.py is not next to this file`.
    click it (it avoids the "path too long" error mentioned in Troubleshooting),
    then click **Close** when it says "Setup was successful".
 
-If Python 3.12 is already installed you can skip this.
+If you are not sure whether Python 3.12 is installed, go straight to Step 2:
+it tells you if Python is missing.
 
 ## Step 2 - run the setup (once)
 
 Double-click **`setup_windows.bat`**.
 
 A black window opens and works through 8 steps. It can take 10 to 40 minutes,
-most of it downloading. What it does:
+most of it downloading. Plug the laptop in and do not let it go to sleep while
+it runs. What it does:
 
 1. Finds Python 3.12 (or 3.11).
 2. Creates a private folder `.venv` with its own copy of Python - nothing else
@@ -107,7 +114,8 @@ most of it downloading. What it does:
    built this bundle could not reach HuggingFace, so your PC fetches them on
    first setup. `download_weights.bat` does this and can be re-run on its own.
 6. Tests whether the graphics card really works - once for the pose model
-   (`DEVICE=cuda` or `cpu`) and once for the person detector
+   (`DEVICE=cuda` or `cpu`; CUDA is NVIDIA's name for running programs on the
+   graphics card) and once for the person detector
    (`DETECTOR=medium` or `nano`) - and writes the result into `config.bat`. The
    run scripts read that file. Any error messages from these tests go into
    `gpu_check.log` in this folder.
@@ -122,16 +130,18 @@ A good result ends with lines like these, and then "Press any key to continue":
 [8/8] Verifying ...
 ok
 pose model ok, running on CUDAExecutionProvider
-onnxruntime 1.26.0 providers: ['CUDAExecutionProvider', 'CPUExecutionProvider']
+onnxruntime 1.26.0 providers: ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
 torch 2.8.0+cu128 cuda available: True
 
 ===== SETUP FINISHED - everything is ready =====
   device=cuda  detector=medium  (change them in config.bat if needed)
 ```
 
-On a PC without an NVIDIA card you will see `device=cpu  detector=nano`,
-`pose model ok, running on CPUExecutionProvider`, `torch 2.8.0+cpu` and
-`cuda available: False` - that is normal. On a GTX
+In the `providers:` line only the word `CUDAExecutionProvider` matters; the
+other names vary. On a PC without an NVIDIA card that line reads
+`['AzureExecutionProvider', 'CPUExecutionProvider']` and you will see
+`device=cpu  detector=nano`, `pose model ok, running on CPUExecutionProvider`,
+`torch 2.8.0+cpu` and `cuda available: False` - that is normal. On a GTX
 10-series card you get `device=cpu  detector=medium` and `cuda available: True`.
 
 If instead you see `***** SETUP FAILED while ... *****`, scroll up, read the
@@ -143,8 +153,9 @@ last error lines, and look in "Troubleshooting" below. Running
 **How to "drag a file onto" a script**: open a second window showing your
 photo or video (or use the Desktop), press and hold the left mouse button on
 it, move it over the `run_image.bat` icon until that icon highlights, and let
-go. A black window opens with `Running InstantHMR on photo: C:\...\photo.jpg`.
-It then prints `Warming up models (max_persons=2)...` and finally `Ready.` -
+go. Drag one file at a time. A black window opens with `Running InstantHMR on
+photo: "C:\...\photo.jpg"`. It then prints a line starting with `Warming up
+models` and finally `Ready.` -
 this pause is normal: 10 to 30 seconds with a graphics card, one or two minutes
 without. Then the **Rerun viewer** opens (it may open behind the black window -
 look in the taskbar). It has three areas: **Camera** (your picture with the
@@ -158,17 +169,21 @@ only talks to this PC).
 
 Each run opens two things: the black window (progress and messages) and the
 Rerun viewer window (the result). Close the viewer when you are done, then
-press a key in the black window (for the webcam, see below).
+press a key in the black window (for the webcam, see below). If a viewer
+window is still open from an earlier run, the new run appears inside it as a
+second recording (listed on the left); close the old viewer first if that
+confuses you.
 
 **A photo**: drag a `.jpg` or `.png` file onto **`run_image.bat`**.
 The viewer shows the photo with the skeleton drawn on it, and the 3D skeleton
 you can rotate with the mouse. The black window prints a line like
-`image: persons= 1  RF-DETR= 45.2 ms  InstantHMR=  5.1 ms  total= 51.0 ms`.
+`image: persons= 1  RF-DETR= 45.2 ms  InstantHMR=  5.1 ms  total= 51.0 ms ( 19.6 fps)`.
 
 **A video file**: drag a `.mp4`, `.mov` or `.avi` onto **`run_video.bat`**.
 The viewer fills up as the clip is processed; drag the time slider at the
-bottom to scrub. How long it takes: with a graphics card about as long as the
-clip itself, on the processor 5 to 15 times the clip's length (a 30-second
+bottom to scrub (move back and forth in the clip). How long it takes: with a
+graphics card about as long as the clip itself, on the processor 5 to 15 times
+the clip's length (a 30-second
 phone clip: well under a minute with a card, several minutes without). The
 black window first prints `video: clip.mp4, 900 frames @ 30.0 fps` and then a
 progress line every 30 frames, for example
@@ -177,8 +192,9 @@ it is working. Keep clips to a few minutes: the viewer holds every frame in
 memory and starts dropping the oldest ones when memory is full. Smoothing is
 on (the `1euro` filter: no lag, less jitter) and the person detector runs on
 every 2nd frame to go faster. To stop early, click on the black window and
-press **Ctrl+C**; at `Terminate batch job (Y/N)?` type **N** so the window
-stays open and you can read the `summary` line (if you press Ctrl+C while the
+press **Ctrl+C**; at `Terminate batch job (Y/N)?` type **N** and press Enter so
+the window stays open and you can read the `summary` line (if you press Ctrl+C
+while the
 models are still loading, it just says `Stopped before the clip was
 processed.`). At the end it prints a `summary` line with the average speed,
 and a short jitter report.
@@ -190,7 +206,11 @@ in the folder window's address bar, type `cmd`, press Enter) and run
 viewer has the keyboard after it opens), then press **Ctrl+C**. Windows asks
 `Terminate batch job (Y/N)?` - type **N** and press Enter to keep the window
 open (it prints `Stopped.`), or **Y** to close it. Closing the viewer window
-does **not** stop the camera; closing the black window with its X does.
+does **not** stop the camera; closing the black window with its X does. If the
+picture freezes right after you clicked in the black window, you selected text
+by accident (Windows 10): press Esc in that window and it continues.
+`run_camera.bat` takes a camera number, not a file: dragging a video onto it
+only prints a message (use `run_video.bat` for files).
 
 **Record a video to a file you can reopen**: drag the video onto
 **`record_video.bat`** instead of `run_video.bat`. Unlike `run_video.bat`, no
@@ -217,6 +237,102 @@ runs it and does nothing visible. `DEVICE` is `cuda` (NVIDIA card) or `cpu`.
 `DETECTOR` is the person detector size: `nano` (fastest), `small`, `medium`
 (default on a GPU), `base` or `large` (most accurate, slowest). After changing
 `DETECTOR`, the next run first downloads that detector (about 400 MB, once).
+If `config.bat` is missing, the run scripts say so and use `cuda` / `medium`
+until you run `setup_windows.bat` again.
+
+## Motion capture files (BVH for Blender)
+
+`run_video.bat` and `record_video.bat` only show the result. To get the
+motion as files you can use in Blender or another 3D program, drag the video
+onto **`export_mocap.bat`** instead. It processes the clip like
+`record_video.bat` (no viewer until the end; with a graphics card it is
+somewhat slower, because the person detector runs on every frame; on the
+processor it takes 5 to 15 times the clip's length), then turns the per-frame
+skeletons into one steady animation per person and writes these files next
+to the video. For `C:\clips\dance.mp4`:
+
+- `dance.track0.bvh` - the animation, for Blender and most other 3D tools
+  (BVH is the standard motion-capture text format). One file per person:
+  `track0` is the first person found, a second person gets `track1`. An
+  extra track can also be a false detection (a coat on a hook, a reflection):
+  the report, see below, marks a track that is short or low in confidence
+  with `may be a false detection` - ignore its files.
+- `dance.track0.csv` - the same animation as a spreadsheet (opens in Excel):
+  one row per video frame, with the x / y / z position of every joint in
+  metres.
+- `dance.mocap.json` and `dance.mocap.npz` - everything (all persons, the raw
+  and the cleaned-up positions, the model's own parameters), for programmers.
+- `dance.rrd` - the viewer recording, like the one `record_video.bat` makes
+  (with the export's steadier smoothing). The viewer opens with it when the
+  script is finished.
+
+Copy the video to a folder on this PC first (for example `C:\clips`): the
+files are written next to the video, which does not work from a phone, camera
+or network location.
+
+While it runs, the black window prints a progress line every 30 frames, as
+`record_video.bat` does. To stop early, click the window, press Ctrl+C and
+answer N at `Terminate batch job (Y/N)?`; the files then cover the part of
+the clip processed so far. At the end it prints a short report, for example:
+
+```
+mocap: 1 track(s)
+  track 0: frames 0-899, 900 samples, 3 filled in, mean confidence 0.91
+floor: y = -0.812 m before levelling (now y = 0); camera pitched 8.0 deg down, floor levelled
+foot anchoring: root movement per frame (real motion counts too), speed of planted feet
+  track 0: root 6.3 -> 2.1 mm/frame (67% less); planted feet 0.141 -> 0.009 m/s (a foot is planted on 72% of foot-frames)
+finger chains ordered as expected
+motion capture written:
+  C:\clips\dance.mocap.json
+  C:\clips\dance.mocap.npz
+  C:\clips\dance.track0.csv
+  C:\clips\dance.track0.bvh
+```
+
+(The numbers are an invented example.) `samples` is the number of frames in
+the animation, `mean confidence` is how sure the detector was, on average,
+that this is a person (0 to 1), and `foot-frames` counts each foot in each
+frame separately, so 72% means a foot was on the floor about three quarters
+of the time. `filled in` is the number of frames where the person was not
+found and the skeleton was filled in from the frames around it. `camera
+pitched ... down, floor levelled` means the camera was looking down a little
+and the program straightened the floor; `camera pitch not measured` means the
+person did not move far enough towards or away from the camera to tell (one
+metre is needed), and the camera is taken to be level. `root ... mm/frame`
+is how much the body moved from one frame to
+the next, before and after the feet were used to steady it; `planted feet` is
+how fast a foot that stands on the floor was still moving - after the
+clean-up it should be close to 0. A line `finger chains NOT ordered as
+expected` means the hand points came out in an order the program did not
+expect: the body is fine, only the fingers in the files may be wrong - tell
+the developer. Then `motion capture written:` lists the files and the viewer
+opens.
+
+**Opening the animation in Blender** (version 4.x, free from
+https://www.blender.org): **File > Import > Motion Capture (.bvh)**, choose
+the `.track0.bvh` file. In the panel on the right of the file window set
+**Scale** to `0.01` (the file is in centimetres and Blender works in metres;
+the scale only changes the size, never the motion), and in the **Animation**
+part of the same panel tick **Update Scene FPS** and **Update Scene
+Duration** (otherwise Blender keeps its own 24 frames per second and
+250-frame timeline: a 30 fps clip then plays in slow motion and stops after 8
+seconds), then click **Import BVH**. A stick figure appears. Press **Space** to play it and drag the time
+slider at the bottom to scrub. The floor is at height 0, and the person faces
+the +Z direction of the file (towards the camera that filmed them), which with
+Blender's default import settings puts them facing you in the Front view
+(numpad 1).
+
+**What to expect.** The skeleton has 70 points: body, face, both hands with
+all fingers, and the feet. The body proportions are measured once over the
+whole clip and held constant, so the figure does not change size from frame
+to frame. The feet are used to steady the body: a foot that stands on the
+floor is held in place on the floor, which removes most of the back-and-forth
+sliding the model would otherwise produce. Fast motion, a person partly out of the
+picture, two people crossing, or a person leaving and re-entering the frame
+can still produce glitches: a jump, a twisted limb for a few frames, or one
+person split into `track0` and `track1`. Nothing here is perfect - it is the
+model's estimate of each single frame, cleaned up, not a studio motion
+capture.
 
 ## Optional - draw the body surface (mesh)
 
@@ -252,14 +368,16 @@ again to get back the known-good packages.
 
 ## Troubleshooting
 
-**"Python 3.12 (or 3.11) was not found"** - Do Step 1 with the exact link
-given there. In the installer the "Add python.exe to PATH" box must be ticked.
-If Python is installed but still not found, uninstall and reinstall it with
-that box ticked. Python 3.13 and 3.14 are not accepted on purpose: some
-packages have no version for them yet.
+**"64-bit Python 3.12 (or 3.11) was not found"** - Do Step 1 with the exact
+link given there (it is the 64-bit installer; a 32-bit Python is not accepted
+because the packages only exist for 64-bit). In the installer the "Add
+python.exe to PATH" box must be ticked. If Python is installed but still not
+found, uninstall and reinstall it with that box ticked. Python 3.13 and 3.14
+are not accepted on purpose: some packages have no version for them yet.
 
-**"The .venv folder was made with a different Python version"** - delete the
-`.venv` folder inside the bundle and run `setup_windows.bat` again.
+**"The .venv folder was made with a different Python version (or a 32-bit
+one)"** - delete the `.venv` folder inside the bundle and run
+`setup_windows.bat` again.
 
 **"This folder is on a network location"** - the bundle sits on a network
 share (`\\server\...`), where the scripts cannot run. Copy the whole folder
@@ -278,7 +396,8 @@ https://aka.ms/vs/17/release/vc_redist.x64.exe (run it, click **Install**, then
 somewhere on its own. Do Step 0 and use the scripts in the extracted folder.
 
 **Weights download failed / "only N bytes, that is an error page"** - your PC
-could not reach huggingface.co (no internet, a company firewall, a proxy).
+could not reach huggingface.co (no internet, a company firewall, a proxy -
+a company gateway that filters internet traffic).
 Try again later or on another network, or download the file in a browser:
 https://huggingface.co/momolesang/InstantHMR/resolve/main/instanthmr.onnx
 and save it as `models\instanthmr.onnx` inside the bundle (about 77 MB). Then
@@ -294,15 +413,20 @@ for ...`** - the photo or video is in a format the program cannot read. Phone
 photos are often `.heic`: on an iPhone set Settings > Camera > Formats >
 **Most Compatible** before taking the picture, or open the picture in the
 Windows Photos app and use **Save as** to make a `.jpg`. Videos must be
-`.mp4`, `.mov` or `.avi`.
+`.mp4`, `.mov` or `.avi`. If you dragged a `.rrd`, `.bvh` or `.json` onto a
+run script by mistake: a `.rrd` goes onto `open_recording.bat`, the others
+are results, not inputs.
 
 **"unsupported platform"** - this message comes from the original `install.py`,
 which only knew Linux and macOS. The `install.py` in this bundle handles
 Windows. If you see it, you are running an old copy; use this bundle's file.
 
-**`AttributeError: ... has no attribute 'optimize_for_inference'`** - the
-person detector package is too new. Open a Command Prompt in this folder and
-run `.venv\Scripts\python.exe -m pip install "rfdetr>=1.8,<1.11"`.
+**`AttributeError: ... has no attribute 'optimize_for_inference'`** - the file
+`instanthmr\detector.py` in this bundle was replaced by the original upstream
+one. Upstream's copy calls a function that newer versions of the detector
+package no longer have; the bundle's copy works with old and new versions.
+Put the bundle's `instanthmr\detector.py` back (extract it from the zip again).
+Do not downgrade or pin the detector package.
 
 **Setup chose `device=cpu` although this PC has an NVIDIA card / the demo is
 slow** - Scroll up in the setup window to the line starting with
@@ -311,8 +435,10 @@ installed: install it from https://www.nvidia.com/drivers, restart the PC, then
 run `setup_windows.bat` again - it notices that the processor-only packages are
 installed, prints `installed torch is the cpu build - replacing it with cu128`
 and swaps them for the graphics-card versions (another 3 to 4 GB download; no
-need to delete `.venv`). `Windows + NVIDIA (compute capability ...)` means the
-card was found but could not be used: open `gpu_check.log` in Notepad.
+need to delete `.venv`). `Windows + NVIDIA (compute capability ...)` (compute
+capability is NVIDIA's number for the card's generation; 7.5 and up is GTX 16 /
+RTX 20 or newer) means the card was found but could not be used: open
+`gpu_check.log` in Notepad.
 `Require cuDNN 9.* and CUDA 12.*`, `CUDA driver version is insufficient` or
 `no kernel image is available` means the driver is too old or the card is
 too old for the CUDA 12.8 packages: update the driver from
@@ -368,6 +494,16 @@ antivirus exceptions and run setup again.
 person, roughly upright, not too small in the frame. Only the 2 most confident
 people are processed per frame.
 
+**`mocap: no person was tracked for 2 frame(s) or more` in the report, and
+`motion capture written:` lists only the `.mocap.json` and `.mocap.npz`
+files - no `.bvh` or `.csv` appeared** - there was no animation to write (the
+`.mocap.json` and `.mocap.npz` files are still written, without tracks). See
+"Nothing is detected in the picture". **`Failed to create file: Access is
+denied` (or `Permission denied`, `No such file or directory`) right after
+`Ready.`, before any `frame` line** - the recording and the files go next to
+the video, so the video must be in a folder this PC can write to: copy it to
+`C:\clips` and drag it from there.
+
 **`MHR SETUP FAILED`** - see the end of "Optional - draw the body surface".
 
 ## What was built where
@@ -380,11 +516,14 @@ people are processed per frame.
   detection through `nvidia-smi`, CUDA or CPU packages), installs PyTorch 2.8.0
   (CUDA 12.8 build for GTX 16 / RTX 20-series and newer, CUDA 12.6 build for
   GTX 10-series, CPU build otherwise), pins `onnxruntime-gpu` to 1.26.0 (the
-  last version built for CUDA 12) and pins the detector package `rfdetr` below
-  1.11 (1.11 removed a function the demo calls). `requirements.txt` carries the
-  same `rfdetr` pin. When it is run again on an existing `.venv` it replaces a
-  PyTorch or onnxruntime of the wrong kind (CPU vs. graphics card) instead of
-  keeping it.
+  last version built for CUDA 12) and asks for the detector package `rfdetr`
+  1.8 or newer (`requirements.txt` says the same). When it is run again on an
+  existing `.venv` it replaces a PyTorch or onnxruntime of the wrong kind (CPU
+  vs. graphics card) instead of keeping it.
+- Changed for newer detector packages: `instanthmr\detector.py` accepts both
+  the old and the new name of the detector's start-up function
+  (`optimize_for_inference` / `inference`), so any `rfdetr` from 1.8 on works.
+  Keep this file: see the `AttributeError` entry in Troubleshooting.
 - Added, all plain text, all re-runnable:
   - `setup_windows.bat` - the one-click installer described in Step 2. It
     refuses to run from a network location, checks for the Visual C++ runtime
@@ -396,6 +535,12 @@ people are processed per frame.
     run `demo.py` with sensible motion-capture settings; they read `config.bat`.
     `record_video.bat` processes the clip without a viewer and opens the saved
     `.rrd` in the viewer afterwards.
+  - `export_mocap.bat` - like `record_video.bat`, but also writes the
+    motion-capture files (`.bvh`, `.csv`, `.mocap.json`, `.mocap.npz`) next
+    to the video; see "Motion capture files".
+  - `instanthmr\mocap_skeleton.py`, `instanthmr\mocap.py`, `instanthmr\bvh.py`
+    and the `tests` folder - the code behind `export_mocap.bat` (new, not
+    from upstream; `BUNDLE_NOTES.md` describes it).
   - `open_recording.bat` - opens a saved `.rrd` recording in the viewer.
   - `config.bat` - written by setup: `DEVICE` and `DETECTOR`.
   - `gpu_check.log` - written by setup: the error output of the GPU tests.

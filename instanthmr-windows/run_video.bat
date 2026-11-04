@@ -20,6 +20,7 @@ if not exist ".venv\Scripts\python.exe" goto :no_setup
 set "DEVICE=cuda"
 set "DETECTOR=medium"
 if exist "config.bat" call "config.bat"
+if not exist "config.bat" echo   (config.bat is missing - run setup_windows.bat again to detect the GPU; using device=cuda detector=medium for now)
 set "RF_HOME=%~dp0models\rfdetr"
 set "MHR="
 rem mhr_ready.txt is written by download_mhr_assets.bat only after all its checks pass.
@@ -27,9 +28,11 @@ if exist "models\mhr_assets\mhr_ready.txt" set "MHR=--mhr-assets models\mhr_asse
 
 echo Running InstantHMR on video: "%INPUT%"
 echo   device=%DEVICE%  detector=%DETECTOR%  smoothing=1euro  detector-stride=2  %MHR%
-echo   To stop early: click this window, press Ctrl+C, answer N to "Terminate batch job"
-echo   so this window stays open.
+echo   To stop early: click this window, press Ctrl+C, then at "Terminate batch job (Y/N)?"
+echo   answer N and press Enter so this window stays open.
 echo.
+rem Hides the harmless TracerWarning blocks that rfdetr's TorchScript pass prints at every start.
+set "PYTHONWARNINGS=ignore"
 ".venv\Scripts\python.exe" demo.py --video "%INPUT%" --device %DEVICE% --detector-variant %DETECTOR% --smoothing-filter --smoothing-mode 1euro --detector-stride 2 %MHR%
 rem -1073741510 is the Windows code for "stopped with Ctrl+C" (while the models were still loading).
 if "%errorlevel%"=="-1073741510" goto :stopped

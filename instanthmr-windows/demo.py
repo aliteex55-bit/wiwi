@@ -44,6 +44,9 @@ Usage
     # Live camera (index 0)
     python demo.py --camera 0
 
+    # Motion capture: also write clip.mocap.json / .npz, clip.track<N>.csv and .bvh (Blender)
+    python demo.py --video clips/clip.mp4 --smoothing-filter --export clips/clip
+
     # Foot-contact model (--prev-token checkpoint): each person is fed their own
     # prediction from 5 frames earlier, and planted feet are drawn red, with a
     # per-foot contact-probability plot. --no-prev withholds the previous pose.
@@ -56,12 +59,13 @@ import argparse
 from collections import deque
 import sys
 import time
+import traceback
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from instanthmr import PosePipeline, onnx_output_names
+from instanthmr import MocapRecorder, PosePipeline, onnx_output_names
 from instanthmr.mhr_renderer import DEFAULT_MHR_SCRIPT
 from instanthmr.reference import ReferenceTrack, resolve_reference
 from instanthmr.smoothing import TemporalSmoother
@@ -69,6 +73,12 @@ from instanthmr.visualizer import RerunVisualizer
 
 
 DEFAULT_MODEL = "models/instanthmr.onnx"
+EXPORT_FORMATS = ("json", "npz", "csv", "bvh")
+#: Processed frames a person may go undetected and still be the same person:
+#: the smoother's tracker keeps the id alive that long and the recorder fills
+#: in a hole that long (MocapRecorder.max_gap). One number for both, so every
+#: hole the tracker bridges is one the recorder interpolates.
+MAX_GAP = 10
 
 
 def parse_args() -> argparse.Namespace:
@@ -227,8 +237,46 @@ def parse_args() -> argparse.Namespace:
             "raise it towards 1.0 for a solid mesh."
         ),
     )
+    p.add_argument(
+        "--export", type=str, default=None, metavar="PREFIX",
+        help="Write motion-capture files: PREFIX.mocap.json, PREFIX.mocap.npz, "
+             "PREFIX.track<N>.csv and PREFIX.track<N>.bvh (the BVH opens in "
+             "Blender). For a video, '--export C:/clips/dance' puts them next "
+             "to the clip. See instanthmr/mocap.py.",
+    )
+    p.add_argument(
+        "--export-formats", type=str, default=",".join(EXPORT_FORMATS), metavar="LIST",
+        help="Comma list of the files --export writes, among json,npz,csv,bvh "
+             "(default: all four).",
+    )
+    p.add_argument(
+        "--no-footlock", action="store_true",
+        help="Keep the model's own root motion instead of anchoring it on the "
+             "planted feet (--export only).",
+    )
+    p.add_argument(
+        "--no-floor", action="store_true",
+        help="Do not shift the skeleton so that the floor is y=0 (--export only).",
+    )
 
-    return p.parse_args()
+    args = p.parse_args()
+    # Checked here, before any model loads, so a typo costs a second, not a minute.
+    args.export_formats = [f.strip() for f in args.export_formats.split(",") if f.strip()]
+    unknown = [f for f in args.export_formats if f not in EXPORT_FORMATS]
+    if unknown:
+        p.error(f"--export-formats: unknown format(s) {', '.join(unknown)}; "
+                f"choose among {', '.join(EXPORT_FORMATS)}")
+    if args.frame_skip < 1:
+        p.error("--frame-skip must be >= 1")
+    if args.export is not None:
+        prefix = Path(args.export)
+        if not prefix.name or args.export.endswith(("/", "\\")) or prefix.is_dir():
+            p.error("--export needs a file-name prefix, e.g. C:/clips/dance, not a folder")
+        if not prefix.parent.is_dir():
+            p.error(f"--export: folder does not exist: {prefix.parent}")
+    elif args.no_footlock or args.no_floor or args.export_formats != list(EXPORT_FORMATS):
+        print("[warn] --export-formats / --no-footlock / --no-floor do nothing without --export")
+    return args
 
 
 def resolve_model_path(args: argparse.Namespace) -> Path:
@@ -433,6 +481,7 @@ def build_smoother(args: argparse.Namespace, live: bool = False, mhr=None):
         beta_scale=args.smoothing_beta,
         mincutoff_scale=args.smoothing_mincutoff,
         keypoint_fn=kp_fn,
+        max_age=MAX_GAP,
     )
     if kp_fn is None:
         print("  note: no MHR keypoint backend — keypoints are filtered on their "
@@ -444,6 +493,34 @@ def build_smoother(args: argparse.Namespace, live: bool = False, mhr=None):
         lag = f", {sm.lag} frame lag" if sm.lag else ""
         print(f"temporal smoothing: window={sm.window}, mode={sm.mode}{lag}")
     return sm
+
+
+def build_recorder(args: argparse.Namespace, fps: float | None, frame_step: int = 1,
+                   **kwargs) -> MocapRecorder | None:
+    """The motion-capture recorder for --export, or ``None`` when it is off.
+
+    ``fps`` is the rate of the frames that get PUSHED (``None`` = measure it
+    from the timestamps, for a live camera) and ``frame_step`` the stride of
+    their frame numbers; see :class:`instanthmr.mocap.MocapRecorder`.
+    """
+    if args.export is None:
+        return None
+    return MocapRecorder(fps=fps, frame_step=frame_step, footlock=not args.no_footlock,
+                         floor=not args.no_floor, max_gap=MAX_GAP, **kwargs)
+
+
+def export_mocap(recorder: MocapRecorder, args: argparse.Namespace) -> None:
+    """Clean up the recorded tracks, print the recorder's report and write the
+    files. Called once per run, after the LAST frame has been pushed."""
+    recorder.finish()
+    print("\n" + recorder.report())
+    print("writing files (about 10 s per minute of video) ...", flush=True)
+    paths = recorder.export(args.export, args.export_formats)
+    print("motion capture written:")
+    for path in paths:
+        print(f"  {path}")
+    if not paths:
+        print("  (none)")
 
 
 def run_image(args: argparse.Namespace) -> None:
@@ -473,6 +550,12 @@ def run_image(args: argparse.Namespace) -> None:
         len(result.persons),
     )
 
+    # One frame is a one-frame track: no feet to anchor on, floor from this frame.
+    recorder = build_recorder(args, fps=None, min_frames=1)
+    if recorder is not None:
+        recorder.push(0, 0.0, result.persons)
+        export_mocap(recorder, args)
+
 
 def run_video(args: argparse.Namespace) -> None:
     video_path = Path(args.video)
@@ -489,6 +572,8 @@ def run_video(args: argparse.Namespace) -> None:
 
     pipeline, viz, mhr = build_all(args)
     smoother = build_smoother(args, mhr=mhr)
+    # Pushed frames are 0, frame_skip, 2*frame_skip, ... at fps / frame_skip.
+    recorder = build_recorder(args, fps=fps / args.frame_skip, frame_step=args.frame_skip)
 
     frame_idx = 0
     sent = 0
@@ -501,6 +586,7 @@ def run_video(args: argparse.Namespace) -> None:
     # t + (window-1)//2, so the frames still in flight wait here with the data
     # the visualizer will need for them.
     pending: deque[tuple[int, np.ndarray, float, float, float]] = deque()
+    failed = False
 
     def emit(persons) -> None:
         f_idx, f_rgb, d_ms, h_ms, t_ms = pending.popleft()
@@ -512,6 +598,8 @@ def run_video(args: argparse.Namespace) -> None:
             hmr_ms=h_ms,
             total_ms=t_ms,
         ))
+        if recorder is not None:
+            recorder.push(f_idx, f_idx / fps, persons)
 
     try:
         while True:
@@ -551,18 +639,31 @@ def run_video(args: argparse.Namespace) -> None:
                     float(np.mean(tot_times[-30:])),
                     len(result.persons),
                 )
-        if smoother is not None:
-            for smoothed in smoother.flush():
-                emit(smoothed)
     except KeyboardInterrupt:
         print("\ninterrupted")
+    except Exception:
+        # A bad frame, a model error: still export what was captured before it.
+        # On a CPU a run takes 5-15x the clip's length, so losing it is the
+        # worst outcome, and the files are never worse than nothing.
+        traceback.print_exc()
+        failed = True
     finally:
         cap.release()
 
     if smoother is not None:
+        # Drain the delay line here, after the loop, so Ctrl+C does not drop
+        # the last (window-1)//2 frames: they were processed and belong in the
+        # recording and the export.
+        for smoothed in smoother.flush():
+            emit(smoothed)
         report = smoother.jitter_report()
         if report:
             print("\n" + report)
+
+    # After the smoother flush, so the frames it held back are in; also after
+    # Ctrl+C, so an interrupted run still yields what was captured so far.
+    if recorder is not None:
+        export_mocap(recorder, args)
 
     if tot_times:
         # Skip the first frame from the average — it bears the warm-up cost.
@@ -578,6 +679,8 @@ def run_video(args: argparse.Namespace) -> None:
             f"total={float(np.mean(tot_times[warm])):.1f} ms "
             f"({1000.0 / float(np.mean(tot_times[warm])):.1f} fps)"
         )
+    if failed:
+        sys.exit(1)
 
 
 def run_camera(args: argparse.Namespace) -> None:
@@ -592,18 +695,25 @@ def run_camera(args: argparse.Namespace) -> None:
 
     pipeline, viz, mhr = build_all(args)
     smoother = build_smoother(args, live=True, mhr=mhr)
+    recorder = build_recorder(args, fps=None)   # fps measured from the timestamps
 
     frame_idx = 0
     det_times: list[float] = []
     hmr_times: list[float] = []
     render_times: list[float] = []
     tot_times: list[float] = []
+    failed = False
+    # Wall clock, not frame_idx/fps: a webcam's real frame interval drifts and
+    # drops. Seconds since the start, so the exported time stamps begin at 0
+    # like a video's (perf_counter's own zero is arbitrary, e.g. system boot).
+    t_start = time.perf_counter()
     try:
         while True:
             ret, bgr = cap.read()
             if not ret:
                 print("[warn] camera read failed")
                 break
+            elapsed = time.perf_counter() - t_start
 
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             result = pipeline.predict(rgb)
@@ -613,11 +723,9 @@ def run_camera(args: argparse.Namespace) -> None:
 
             persons = result.persons
             if smoother is not None:
-                # Wall clock, not frame_idx/fps: a webcam's real frame interval
-                # drifts and drops, and the adaptive cutoff is a function of
-                # speed, so it needs the interval that actually elapsed.
-                persons = smoother.push(
-                    persons, timestamp=time.perf_counter()) or persons
+                # The adaptive cutoff is a function of speed, so it needs the
+                # interval that actually elapsed.
+                persons = smoother.push(persons, timestamp=elapsed) or persons
 
             render_ms = viz.log_frame(
                 rgb, persons,
@@ -628,6 +736,8 @@ def run_camera(args: argparse.Namespace) -> None:
                 total_ms=result.total_ms,
             )
             render_times.append(render_ms)
+            if recorder is not None:
+                recorder.push(frame_idx, elapsed, persons)
 
             if frame_idx and frame_idx % 30 == 0:
                 _print_timings(
@@ -641,8 +751,17 @@ def run_camera(args: argparse.Namespace) -> None:
             frame_idx += 1
     except KeyboardInterrupt:
         print("\nstopped")
+    except Exception:
+        traceback.print_exc()   # as in run_video: export what was captured
+        failed = True
     finally:
         cap.release()
+
+    # Ctrl+C is how a camera run ends, so the files are written here, after it.
+    if recorder is not None:
+        export_mocap(recorder, args)
+    if failed:
+        sys.exit(1)
 
 
 def main() -> None:

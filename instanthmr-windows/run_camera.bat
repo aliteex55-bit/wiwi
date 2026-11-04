@@ -14,11 +14,16 @@ cd /d "%~dp0"
 if not exist "demo.py" goto :not_extracted
 set "CAM=%~1"
 if "%CAM%"=="" set "CAM=0"
+rem A dragged file (or anything else that is not a number) is not a camera index.
+if exist "%~1" goto :bad_cam
+echo %CAM%| findstr /r /c:"^[0-9][0-9]*$" >nul
+if not "%errorlevel%"=="0" goto :bad_cam
 if not exist ".venv\Scripts\python.exe" goto :no_setup
 
 set "DEVICE=cuda"
 set "DETECTOR=medium"
 if exist "config.bat" call "config.bat"
+if not exist "config.bat" echo   (config.bat is missing - run setup_windows.bat again to detect the GPU; using device=cuda detector=medium for now)
 set "RF_HOME=%~dp0models\rfdetr"
 set "MHR="
 rem mhr_ready.txt is written by download_mhr_assets.bat only after all its checks pass.
@@ -27,10 +32,12 @@ if exist "models\mhr_assets\mhr_ready.txt" set "MHR=--mhr-assets models\mhr_asse
 echo Starting live capture from camera %CAM%
 echo   device=%DEVICE%  detector=%DETECTOR%  smoothing=1euro  detector-stride=2  %MHR%
 echo   A Rerun viewer window opens. Closing the viewer does NOT stop the camera.
-echo   To stop: click THIS window, press Ctrl+C, then answer N to "Terminate batch job"
-echo   so this window stays open (Y closes it at once).
+echo   To stop: click THIS window, press Ctrl+C, then at "Terminate batch job (Y/N)?"
+echo   answer N and press Enter so this window stays open (Y closes it at once).
 echo   If the wrong camera opens, or none, try: run_camera.bat 1
 echo.
+rem Hides the harmless TracerWarning blocks that rfdetr's TorchScript pass prints at every start.
+set "PYTHONWARNINGS=ignore"
 ".venv\Scripts\python.exe" demo.py --camera %CAM% --device %DEVICE% --detector-variant %DETECTOR% --smoothing-filter --detector-stride 2 %MHR%
 rem -1073741510 is the Windows code for "stopped with Ctrl+C" (while the models were still loading).
 if "%errorlevel%"=="-1073741510" goto :stopped
@@ -43,6 +50,12 @@ exit /b 0
 
 :no_setup
 echo ***** The .venv folder is missing. Double-click setup_windows.bat first. *****
+pause
+exit /b 1
+
+:bad_cam
+echo ***** run_camera.bat takes a camera NUMBER (0, 1, 2 ...), not a file. *****
+echo Double-click it for the default webcam, or drag your video onto run_video.bat instead.
 pause
 exit /b 1
 

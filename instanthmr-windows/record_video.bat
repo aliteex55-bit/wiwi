@@ -24,6 +24,7 @@ if not exist ".venv\Scripts\python.exe" goto :no_setup
 set "DEVICE=cuda"
 set "DETECTOR=medium"
 if exist "config.bat" call "config.bat"
+if not exist "config.bat" echo   (config.bat is missing - run setup_windows.bat again to detect the GPU; using device=cuda detector=medium for now)
 set "RF_HOME=%~dp0models\rfdetr"
 set "MHR="
 rem mhr_ready.txt is written by download_mhr_assets.bat only after all its checks pass.
@@ -36,9 +37,11 @@ echo    network location is read-only and the recording cannot be saved there)
 echo   device=%DEVICE%  detector=%DETECTOR%  smoothing=1euro  detector-stride=2  %MHR%
 echo   No viewer opens while the clip is processed - watch the frame lines here.
 echo   The viewer opens with the result when it is finished.
-echo   To stop early: click this window, press Ctrl+C, answer N to "Terminate batch job"
-echo   so this window stays open.
+echo   To stop early: click this window, press Ctrl+C, then at "Terminate batch job (Y/N)?"
+echo   answer N and press Enter so this window stays open.
 echo.
+rem Hides the harmless TracerWarning blocks that rfdetr's TorchScript pass prints at every start.
+set "PYTHONWARNINGS=ignore"
 ".venv\Scripts\python.exe" demo.py --video "%INPUT%" --device %DEVICE% --detector-variant %DETECTOR% --smoothing-filter --smoothing-mode 1euro --detector-stride 2 --no-spawn --save-rrd "%RRD%" %MHR%
 rem -1073741510 is the Windows code for "stopped with Ctrl+C" (while the models were still loading).
 if "%errorlevel%"=="-1073741510" goto :stopped
@@ -46,7 +49,7 @@ if not "%errorlevel%"=="0" goto :failed
 echo.
 echo Done. The recording was saved to:
 echo   "%RRD%"
-echo Opening it in the Rerun viewer now. Close the viewer to end this window.
+echo Opening it in the Rerun viewer now. Close the viewer, then press any key to end this window.
 echo To open it again later, drag that .rrd file onto open_recording.bat.
 ".venv\Scripts\rerun.exe" "%RRD%"
 pause
@@ -89,8 +92,8 @@ exit /b 1
 :failed
 echo.
 echo ***** InstantHMR stopped with an error. Scroll up to read it. *****
-echo If it says "Permission denied" for the .rrd file, copy the video to a folder on
-echo this PC first (for example C:\clips) and drag it from there.
+echo If it says "Failed to create file: Access is denied" (or "Permission denied") for the
+echo .rrd file, copy the video to a folder on this PC first (for example C:\clips) and drag it from there.
 echo See GUIDE_WINDOWS.md, section "Troubleshooting".
 pause
 exit /b 1

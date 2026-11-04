@@ -4,6 +4,7 @@ from .inference import InstantHMR, HMRPrediction, onnx_output_names
 from .detector import RFDETRDetector
 from .pipeline import PosePipeline, FrameResult
 from .skeleton import JOINT_NAMES, SKELETON_EDGES, NUM_JOINTS, edges_for
+from .mocap import MocapRecorder
 
 __all__ = [
     "InstantHMR",
@@ -16,6 +17,7 @@ __all__ = [
     "SKELETON_EDGES",
     "NUM_JOINTS",
     "edges_for",
+    "MocapRecorder",
 ]
 
 __version__ = "0.1.0"

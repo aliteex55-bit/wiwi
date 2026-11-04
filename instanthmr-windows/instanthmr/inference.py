@@ -107,6 +107,9 @@ class HMRPrediction:
     mhr_params: np.ndarray
     shape_params: np.ndarray
     contact_prob: Optional[np.ndarray] = None   # (2,) [left, right] foot, prev-token graphs only
+    # Persistent id of this person across frames, set by TemporalSmoother /
+    # MocapRecorder; None when nothing tracked it.
+    track_id: Optional[int] = None
 
     def prev_pose(self) -> np.ndarray:
         """This prediction encoded as a prev-token graph's ``prev_pose`` input:

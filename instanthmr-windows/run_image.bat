@@ -18,6 +18,7 @@ if not exist ".venv\Scripts\python.exe" goto :no_setup
 set "DEVICE=cuda"
 set "DETECTOR=medium"
 if exist "config.bat" call "config.bat"
+if not exist "config.bat" echo   (config.bat is missing - run setup_windows.bat again to detect the GPU; using device=cuda detector=medium for now)
 set "RF_HOME=%~dp0models\rfdetr"
 set "MHR="
 rem mhr_ready.txt is written by download_mhr_assets.bat only after all its checks pass.
@@ -27,6 +28,8 @@ echo Running InstantHMR on photo: "%INPUT%"
 echo   device=%DEVICE%  detector=%DETECTOR%  %MHR%
 echo   The first run takes longer: it loads the detector and warms up the model.
 echo.
+rem Hides the harmless TracerWarning blocks that rfdetr's TorchScript pass prints at every start.
+set "PYTHONWARNINGS=ignore"
 ".venv\Scripts\python.exe" demo.py --image "%INPUT%" --device %DEVICE% --detector-variant %DETECTOR% %MHR%
 if not "%errorlevel%"=="0" goto :failed
 echo.

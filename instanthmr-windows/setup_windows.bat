@@ -3,7 +3,7 @@ rem ==================================================================
 rem  InstantHMR - one-click setup for Windows 10 / 11
 rem
 rem  Double-click this file. It
-rem    1. finds Python 3.12 (or 3.11) on this PC
+rem    1. finds 64-bit Python 3.12 (or 3.11) on this PC
 rem    2. creates a private Python environment in the folder .venv
 rem    3. installs the packages (install.py picks GPU or CPU versions)
 rem    4. downloads the model weights (download_weights.bat)
@@ -34,15 +34,17 @@ echo.
 rem ---------- 1. find Python 3.12 or 3.11 ----------
 rem ("%errorlevel%"=="0" rather than "not errorlevel 1": a program that crashes
 rem  hard exits with a NEGATIVE code, which "not errorlevel 1" would count as success)
-set "STEP=finding Python 3.12 or 3.11"
+set "STEP=finding 64-bit Python 3.12 or 3.11"
 set "PYTHON="
-py -3.12 -c "import sys" >nul 2>&1
-if "%errorlevel%"=="0" set "PYTHON=py -3.12"
+rem Only 64-bit Pythons: torch and onnxruntime have no 32-bit wheels. "-64" makes the py
+rem launcher skip 32-bit installs; "python" and an existing .venv are checked via sys.maxsize.
+py -3.12-64 -c "import sys" >nul 2>&1
+if "%errorlevel%"=="0" set "PYTHON=py -3.12-64"
 if defined PYTHON goto :python_found
-py -3.11 -c "import sys" >nul 2>&1
-if "%errorlevel%"=="0" set "PYTHON=py -3.11"
+py -3.11-64 -c "import sys" >nul 2>&1
+if "%errorlevel%"=="0" set "PYTHON=py -3.11-64"
 if defined PYTHON goto :python_found
-python -c "import sys; sys.exit(0 if sys.version_info.major == 3 and sys.version_info.minor in (11, 12) else 1)" >nul 2>&1
+python -c "import sys; sys.exit(0 if sys.version_info.major == 3 and sys.version_info.minor in (11, 12) and sys.maxsize > 2**32 else 1)" >nul 2>&1
 if "%errorlevel%"=="0" set "PYTHON=python"
 if defined PYTHON goto :python_found
 goto :no_python
@@ -61,7 +63,7 @@ if not "%errorlevel%"=="0" goto :error
 goto :venv_ready
 :venv_exists
 echo [2/8] The .venv folder already exists, reusing it.
-"%VPY%" -c "import sys; sys.exit(0 if sys.version_info.major == 3 and sys.version_info.minor in (11, 12) else 1)" >nul 2>&1
+"%VPY%" -c "import sys; sys.exit(0 if sys.version_info.major == 3 and sys.version_info.minor in (11, 12) and sys.maxsize > 2**32 else 1)" >nul 2>&1
 if not "%errorlevel%"=="0" goto :venv_wrong_version
 :venv_ready
 
@@ -116,7 +118,8 @@ if "%errorlevel%"=="0" set "DETECTOR=medium"
 >> "config.bat" echo set "DEVICE=%DEVICE%"
 >> "config.bat" echo set "DETECTOR=%DETECTOR%"
 echo       device=%DEVICE%  detector=%DETECTOR%  - saved in config.bat
-if "%DETECTOR%"=="nano" echo       No usable NVIDIA GPU: the demo will run on the CPU, which is slower.
+if "%FORCE_CPU%"=="1" echo       CPU-only install as requested: the demo runs on the CPU.
+if "%DETECTOR%"=="nano" if "%FORCE_CPU%"=="0" echo       No usable NVIDIA GPU: the demo will run on the CPU, which is slower.
 if "%DETECTOR%"=="nano" if "%FORCE_CPU%"=="0" echo       (gpu_check.log in this folder says why - only interesting if this PC has an NVIDIA card)
 if "%DEVICE%"=="cpu" if "%DETECTOR%"=="medium" echo       The NVIDIA card runs the person detector; the pose model runs on the CPU (older card, see gpu_check.log).
 
@@ -125,6 +128,8 @@ set "STEP=downloading the RF-DETR person detector"
 echo [7/8] Downloading the RF-DETR person detector (%DETECTOR%) into models\rfdetr and test-running it ...
 set "RF_HOME=%~dp0models\rfdetr"
 rem Same call path as demo.py (optimisation pass + one dummy frame), so a package problem shows up here.
+rem PYTHONWARNINGS hides the harmless TracerWarning blocks that pass prints (the run scripts do the same).
+set "PYTHONWARNINGS=ignore"
 "%VPY%" -c "from instanthmr import RFDETRDetector; d = RFDETRDetector(variant='%DETECTOR%'); d.warmup(); print('detector ok')"
 if not "%errorlevel%"=="0" goto :error
 
@@ -152,6 +157,7 @@ echo Next:
 echo   - drag a photo onto run_image.bat
 echo   - drag a video onto run_video.bat   (record_video.bat also saves a .rrd file)
 echo   - double-click run_camera.bat for the webcam
+echo   - drag a video onto export_mocap.bat to get BVH / JSON files for Blender
 echo See GUIDE_WINDOWS.md for details.
 echo.
 pause
@@ -179,9 +185,10 @@ exit /b 1
 
 :no_python
 echo.
-echo ***** Python 3.12 (or 3.11) was not found on this PC. *****
+echo ***** 64-bit Python 3.12 (or 3.11) was not found on this PC. *****
 echo.
-echo   1. Download Python 3.12.10 (the newest 3.12 that has a Windows installer):
+echo   1. Download the 64-bit Python 3.12.10 installer (the newest 3.12 that has one;
+echo      a 32-bit Python is not accepted):
 echo      https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe
 echo   2. Run it. On the first screen tick "Add python.exe to PATH", then click "Install Now".
 echo      On the last screen click "Disable path length limit" if it is offered, then Close.
@@ -192,7 +199,7 @@ exit /b 1
 
 :venv_wrong_version
 echo.
-echo ***** The .venv folder was made with a different Python version. *****
+echo ***** The .venv folder was made with a different Python version (or a 32-bit one). *****
 echo Delete the folder .venv inside "%ROOT%" and double-click setup_windows.bat again.
 echo.
 pause

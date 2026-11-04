@@ -58,7 +58,10 @@ if [ -x "$VPY" ]; then
   fi
 else
   echo "[2/7] Creating the .venv folder ..."
-  "$PYTHON" -m venv .venv || fail
+  if ! "$PYTHON" -m venv .venv; then
+    echo "If the error above mentions ensurepip: on Ubuntu/Debian run  sudo apt install python3.12-venv  (or python3.11-venv), then run this script again."
+    fail
+  fi
 fi
 
 # ---------- 3. pip ----------
@@ -147,6 +150,8 @@ Run the demo from this folder (RF_HOME keeps the detector weights inside it):
   .venv/bin/python demo.py --image photo.jpg --device $DEVICE --detector-variant $DETECTOR
   .venv/bin/python demo.py --video clip.mp4 --device $DEVICE --detector-variant $DETECTOR --smoothing-filter --smoothing-mode 1euro --detector-stride 2
   .venv/bin/python demo.py --camera 0     --device $DEVICE --detector-variant $DETECTOR --smoothing-filter --detector-stride 2
+  .venv/bin/python demo.py --video clip.mp4 --device $DEVICE --detector-variant $DETECTOR --smoothing-filter --export clip
+      (motion capture: writes clip.track0.bvh for Blender, clip.track0.csv, clip.mocap.json and .npz next to clip.mp4)
 
 Add  --save-rrd clip.rrd  to keep a recording; reopen it later with:  .venv/bin/rerun clip.rrd
 MSG

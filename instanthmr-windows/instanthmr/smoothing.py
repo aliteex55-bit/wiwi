@@ -348,7 +348,7 @@ class TemporalSmoother:
                 name: bank[name](getattr(pred, name), t).astype(np.float32)
                 for name in SMOOTHED_FIELDS
             }
-            smoothed = self._finalize(pred, fields)
+            smoothed = self._finalize(pred, fields, track_id)
             out.append(smoothed)
             emitted[track_id] = smoothed
 
@@ -363,8 +363,9 @@ class TemporalSmoother:
         return out
 
     # ------------------------------------------------------------------
-    def _finalize(self, anchor: HMRPrediction, fields: dict) -> HMRPrediction:
-        """Assemble one smoothed prediction, keeping its parts self-consistent.
+    def _finalize(self, anchor: HMRPrediction, fields: dict, track_id: int) -> HMRPrediction:
+        """Assemble one smoothed prediction, keeping its parts self-consistent,
+        and stamp ``track_id`` on it so the mocap recorder knows who it is.
 
         Filtering ``mhr_params`` and ``joints_3d_local`` independently makes the
         green keypoints drift off the skin during fast motion, because the mesh
@@ -386,7 +387,7 @@ class TemporalSmoother:
         fields["joints_3d_cam"] = (
             fields["joints_3d_local"] + fields["cam_trans"][None, :]
         ).astype(np.float32)
-        return replace(anchor, **fields)
+        return replace(anchor, track_id=track_id, **fields)
 
     def _emit(self, centre: int) -> list[HMRPrediction]:
         """Average every track present in frame ``centre`` over the buffer."""
@@ -402,7 +403,7 @@ class TemporalSmoother:
                 ).astype(np.float32)
                 for name in SMOOTHED_FIELDS
             }
-            smoothed = self._finalize(anchor, fields)
+            smoothed = self._finalize(anchor, fields, track_id)
             out.append(smoothed)
             emitted[track_id] = smoothed
 

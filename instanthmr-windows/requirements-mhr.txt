@@ -3,7 +3,7 @@
 # pymomentum is a torch C++ extension built against torch 2.8.x, and the
 # Windows wheel of pymomentum-gpu (0.1.112+) declares NO torch requirement,
 # so pip will not stop a mismatch (it segfaults at import instead of
-# raising). install.py therefore pins torch==2.8.0 everywhere, and
+# raising). install.py therefore pins torch==2.8.0 on Linux and Windows, and
 # download_mhr_assets.bat installs this file with the installed torch and
 # torchvision written to a pip constraints file (-c) so they cannot change:
 #
@@ -17,11 +17,12 @@
 # -------------
 #  * Python >= 3.12  (pymomentum has no Python 3.11 wheels; recreate the
 #    conda env if needed: conda create -n instanthmr python=3.12 -y)
-#  * CUDA toolkit on the system path (recommended for real-time use)
+#  * For pymomentum-gpu: an NVIDIA driver 528 or newer. No CUDA toolkit is
+#    needed - the CUDA libraries ship inside the torch wheel.
 #
 # After installing, also download the MHR body-model assets:
 #
-#   curl -OL https://github.com/facebookresearch/MHR/releases/download/v1.0.0/assets.zip
+#   curl -OL https://github.com/facebookresearch/MHR/releases/download/v1.0.1/assets.zip
 #   unzip assets.zip -d models/mhr_assets
 #
 # Then run:

@@ -11,7 +11,6 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
@@ -155,7 +154,6 @@ class PosePipeline:
         self._batch_persons = batch_persons
         self._frame_idx = 0
         self._last_detections: list[dict] = []
-        self._last_bbox: Optional[np.ndarray] = None
         self.feeds_prev = use_prev and self.hmr.has_prev_input
         self._prev_lag = max(1, prev_lag)
         self._tracker = _Tracker()
@@ -190,15 +188,16 @@ class PosePipeline:
             t0 = time.perf_counter()
             detections = self.detector.detect(image_rgb)
             detector_ms = (time.perf_counter() - t0) * 1000.0
-            if detections:
-                self._last_detections = detections
+            self._last_detections = detections   # empty when the detector saw nobody
         else:
             detections = []
             detector_ms = 0.0
 
-        # If the detector skipped or missed this frame, reuse the previous
-        # detections (slightly expanded to absorb small motion). This is a
-        # cheap form of tracking that keeps HMR fed with a plausible bbox.
+        # On a frame the detector skipped (detector_stride), reuse its last
+        # detections, slightly expanded to absorb small motion. Only on skipped
+        # frames: when the detector ran and saw nobody, the person is gone, and
+        # feeding HMR the old box would keep producing a plausible-looking
+        # skeleton for an empty crop until the end of the clip.
         if not detections and self._last_detections:
             detections = [
                 {
@@ -207,11 +206,6 @@ class PosePipeline:
                 }
                 for d in self._last_detections
             ]
-        elif not detections and self._last_bbox is not None:
-            # Backwards-compatible single-bbox fallback (used when no prior
-            # multi-person detections exist).
-            fb = _expand_bbox(self._last_bbox, w, h, expand=0.1)
-            detections = [{"bbox": fb, "confidence": 0.0}]
 
         # ---- InstantHMR ----
         # Hard-cap so we never exceed the pre-warmed batch size.
@@ -244,10 +238,6 @@ class PosePipeline:
             for t in set(self._history) - self._tracker.active_ids:
                 del self._history[t]
         hmr_ms = (time.perf_counter() - t1) * 1000.0
-
-        if outputs:
-            best = max(outputs, key=lambda o: o.confidence)
-            self._last_bbox = best.bbox.copy()
 
         total_ms = (time.perf_counter() - t_total_start) * 1000.0
         self._frame_idx += 1

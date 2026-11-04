@@ -204,6 +204,7 @@ exit /b 1
 
 :zip_too_small
 del /f /q "%ZIP_PART%"
+if exist "%PINS%" del /f /q "%PINS%"
 echo.
 echo ***** The downloaded file is only %SIZE% bytes - that is an error page, not the zip. *****
 echo It has been deleted. Check the internet connection and try again, or download
@@ -214,6 +215,7 @@ pause
 exit /b 1
 
 :unpack_bad
+if exist "%PINS%" del /f /q "%PINS%"
 echo.
 echo ***** Unpacking finished but models\mhr_assets\lod3.fbx is missing. *****
 echo The zip may be damaged. Delete models\mhr_assets.zip and models\mhr_assets, then run again.
@@ -222,6 +224,7 @@ pause
 exit /b 1
 
 :ort_lost
+if exist "%PINS%" del /f /q "%PINS%"
 echo.
 echo ***** onnxruntime lost its GPU support (config.bat says DEVICE=cuda). *****
 echo Open a Command Prompt in this folder and run:
@@ -232,6 +235,7 @@ pause
 exit /b 1
 
 :error
+if exist "%PINS%" del /f /q "%PINS%"
 echo.
 echo ***** MHR SETUP FAILED while %STEP%. *****
 echo Scroll up and read the last error lines. The skeleton demo still works without the

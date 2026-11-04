@@ -15,7 +15,7 @@ Picks the right Torch + ONNX Runtime wheels for the current machine:
   - Windows — same branches as Linux (NVIDIA detected through
     ``nvidia-smi`` -> CUDA wheels, otherwise CPU wheels).
 
-torch is pinned to 2.8.0 everywhere (torchvision 0.23.0): it satisfies
+torch is pinned to 2.8.0 on Linux and Windows (torchvision 0.23.0): it satisfies
 rfdetr (>=2.2) and transformers 5 (>=2.6), and it is the ABI the optional
 ``pymomentum`` body-mesh package is built against, so the optional MHR
 step never has to replace torch.
