@@ -323,18 +323,33 @@ round off slow motion in the file. Afterwards it lists `dir /b
 
 ### Verified here (Linux, 4 CPUs, no GPU, no real weights)
 
-- `python -m pytest tests -q`: 26 passed (18 in `test_mocap.py`, 8 in
-  `test_bvh.py`), synthetic skeletons with known truth.
+- `python -m pytest tests -q`: 45 passed (27 in `test_mocap.py`, 8 in
+  `test_bvh.py`, 4 in `test_smoothing.py`, 4 in `test_demo.py` with the
+  models and `cv2.VideoCapture` stubbed, 2 in `test_pipeline.py` with stub
+  models), synthetic skeletons with known truth.
+- Review round 1, on the reviewer's own simulations (scripts not shipped):
+  a 25 fps track with a 17-frame hole exports times 0.00, 0.04, ... 0.88
+  (they froze at 0.08 for the hole before); a clean 30 fps gait with +-2 cm
+  slow height drift ends 120 plants with a root offset y of 0.0 cm and the
+  lowest foot within -2.4..+2.6 cm (before: +5.3 cm offset, feet up to +5.8
+  cm above the floor); a 3 m walk towards a camera pitched 10 / 20 deg gives
+  a 0.0 cm floor range after levelling (before: 52 / 103 cm); a simulated
+  walk (true planted fraction 0.50) with 0.5 / 1.0 / 1.5 cm white jitter is
+  planted 0.40 / 0.41 / 0.40 of the time at 30 fps (before 0.38 / 0.04 /
+  0.01) and 0.45 / 0.35 / 0.08 at 60 fps (before 0.04 / 0 / 0) - 1.5 cm at
+  60 fps is still mostly lost.
 - End to end: `demo.py --video` on a 30-frame 1280x497 clip of a real person
   with RF-DETR nano and a stand-in ONNX graph (real input/output names and
   shapes, constant outputs; `joints_3d` is `uniform(-0.6, 0.6)` noise) with
-  `--smoothing-filter --smoothing-mode centered --export`: 9 fps, `mocap: 2
+  `--smoothing-filter --smoothing-mode centered --export`: 8.4 fps, `mocap: 2
   track(s)` (the second: 15 real + 15 filled frames of a low-confidence
-  detection), all six files written - `clip.mocap.json` 451,687 B,
-  `clip.mocap.npz` 41,004 B, `clip.track{0,1}.csv` 59,109 B each,
-  `clip.track{0,1}.bvh` 76,911 B each - and exit code 0. `root 0.0 -> 0.0
-  mm/frame` and `finger chains NOT ordered as expected` are what constant
-  random outputs must give.
+  detection, now reported with `may be a false detection, not a person`),
+  `camera pitch not measured`, all six files written - `clip.mocap.json`
+  453,047 B, `clip.mocap.npz` 109,392 B, `clip.track0.csv` 60,219 B,
+  `clip.track1.csv` 58,096 B, `clip.track{0,1}.bvh` ~75,100 B each - and
+  exit code 0. The same clip followed by 30 black frames (the person leaves):
+  `track 0: frames 0-29` and `num_frames` 60; before the pipeline fix the
+  track ran to frame 59 with 30 confident "valid" frames of an empty crop.
 - The written BVH read back with `read_bvh()`: 71 joints, 30 frames, frame
   time 0.0667 s (the clip is 15 fps), `fk()` reproduces the root exactly. On
   the stand-in the other joints are up to 169 cm off, and that is the

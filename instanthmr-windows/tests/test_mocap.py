@@ -515,10 +515,16 @@ def test_recorder_levels_a_pitched_camera():
     rec = pitched_camera_walk(0.0)
     rec.finish()
     assert abs(rec.camera_pitch_deg) < 0.01
-    # The person has to cover a metre of depth or the slope is noise: a
-    # standing person with 1 cm of jitter gets no correction at all.
+    # A person has to cover a metre of depth or the slope is noise: a
+    # standing person with 1 cm of jitter gets no correction at all, and two
+    # standing persons at different depths (1.5 m apart) do not add up to one.
     joints, _ = jittered_standing(100, amp=0.01)
-    assert estimate_pitch([joints], [np.ones(100, dtype=bool)]) == 0.0
+    valid = np.ones(100, dtype=bool)
+    assert estimate_pitch([joints], [valid]) == 0.0
+    far = joints.copy()
+    far[:, :, 1] += 0.3                 # a bad depth estimate also mis-places the height
+    far[:, :, 2] -= 1.5
+    assert estimate_pitch([joints, far], [valid, valid]) == 0.0
 
 
 def test_report_no_tracks():

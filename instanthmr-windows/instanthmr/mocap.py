@@ -221,16 +221,11 @@ def estimate_floor(
     return float(np.percentile(lows, percentile)) if lows.size else 0.0
 
 
-def _lowest_foot_points(
-    joints_world_list: Sequence[np.ndarray], valid_list: Sequence[np.ndarray],
-) -> np.ndarray:
-    """``(K, 3)``: the lowest foot keypoint of every valid frame of every track."""
+def _lowest_foot_points(joints_world: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """``(K, 3)``: the lowest foot keypoint of every valid frame of one track."""
     foot_nodes = list(FOOT_NODES["left"]) + list(FOOT_NODES["right"])
-    points = []
-    for j, v in zip(joints_world_list, valid_list):
-        feet = np.asarray(j, dtype=np.float64)[np.asarray(v)][:, foot_nodes]
-        points.append(feet[np.arange(len(feet)), feet[:, :, 1].argmin(axis=1)])
-    return np.concatenate(points) if points else np.zeros((0, 3))
+    feet = np.asarray(joints_world, dtype=np.float64)[np.asarray(valid)][:, foot_nodes]
+    return feet[np.arange(len(feet)), feet[:, :, 1].argmin(axis=1)]
 
 
 def estimate_pitch(
@@ -244,13 +239,17 @@ def estimate_pitch(
     straight-line fit of the lowest foot keypoints gives the slope, refitted
     once without the points more than 5 cm above the line (feet in the air).
     Only pitch is estimated, not roll: a camera on a shelf or a tripod is
-    tilted down, not sideways. 0.0 when the points span less than
-    ``min_depth_range`` metres of depth -- a person standing still gives a
-    slope that is all noise, and a level camera is the safer assumption.
+    tilted down, not sideways. Only a track that itself spans at least
+    ``min_depth_range`` metres of depth takes part, and the result is 0.0 when
+    none does: a person standing still gives a slope that is all noise, two
+    people standing at different depths give none at all, and a level camera
+    is the safer assumption.
     """
-    points = _lowest_foot_points(joints_world_list, valid_list)
-    if len(points) < 2 or np.ptp(points[:, 2]) < min_depth_range:
+    points = [_lowest_foot_points(j, v) for j, v in zip(joints_world_list, valid_list)]
+    points = [p for p in points if len(p) > 1 and np.ptp(p[:, 2]) >= min_depth_range]
+    if not points:
         return 0.0
+    points = np.concatenate(points)
     z, y = points[:, 2], points[:, 1]
     slope, intercept = np.polyfit(z, y, 1)
     on_floor = y - (slope * z + intercept) < 0.05
