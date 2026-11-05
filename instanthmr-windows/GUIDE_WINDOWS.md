@@ -374,13 +374,9 @@ opens.
    own 24 frames per second, and a 30 fps clip plays in slow motion). Leave
    **Update Scene Duration** unticked: step 6 sets the length by hand, and
    with the tick an import can make the timeline one frame too long.
-5. Click **Import BVH**. A stick figure appears, drawn in pieces: the bones
-   that start at the hips, the neck, the shoulders, the elbows and the
-   ankles reach only part of the way (a third to a half) to the next point.
-   So the spine, the neck, the arms and the feet have gaps, and the head and
-   the hands seem to float a little apart from the body. That is how Blender
-   draws this file: where the skeleton branches, Blender ends the bone part
-   of the way. Every point is still in the right place and moves correctly.
+5. Click **Import BVH**. A stick figure appears: the whole body, the hands
+   with every finger and the feet, each link drawn as one bone. Every point
+   is in the right place and moves correctly.
 6. At the bottom of the Blender window, at the right end of the timeline,
    set **End** to the number in the line `set End at the bottom of Blender's
    timeline to ...` (double-click the **End** field, type the number, press
@@ -398,21 +394,24 @@ Viewpoint > Front**), the way they faced the camera that filmed them.
 **What to expect.** The skeleton has 71 points: the 70 the model finds
 (body, face, both hands with all fingers, and the feet) plus `hips`, a point
 in the middle between the two hips that carries the body's position. In
-Blender that makes 96 bones. 71 are named after a point and start at it:
-`left_knee`, for example, is the shin, from the knee down to the ankle. The
-other 25 are helper bones. Each starts at a point where the skeleton
-branches (a wrist, an ankle, a shoulder, an elbow, the neck, the nose or the
-hips) and carries one branch: `left_wrist_to_left_thumb_third_joint`, for
-example, runs from the wrist into the thumb. The bone of a branching point
-itself points at its main branch, the one that carries straight on (from
-the shoulder that is the elbow), but stops part of the way, which makes the
-gaps described in step 5: `left_shoulder`, for example, goes half way to
-the elbow. The helper bones are part of the figure - `hips_to_left_hip` is
-the left half of the pelvis, `neck_to_left_shoulder` the left collarbone -
-so leave them be: hidden, the legs, the shoulders and the heels would float
-loose. The short bones at the very ends of the skeleton (the toes, heels,
-fingertips and ears) run at most 1 cm past their point, so a toe on the
-floor can dip a few millimetres under Blender's floor grid. All the bones
+Blender that makes 118 bones. 71 are named after a point and start at it:
+`left_knee`, for example, is the shin, from the knee down to the ankle. 36
+are helper bones. Each starts at a point where the skeleton branches (a
+wrist, an ankle, a shoulder, an elbow, the neck, the nose or the hips) and
+carries one branch: `left_wrist_to_left_thumb_third_joint`, for example,
+runs from the wrist into the thumb, and `hips_to_left_hip` is the left half
+of the pelvis. The bone of a branching point itself is only a few
+millimetres long; it shows which way that part of the body faces (the hand,
+the head, the pelvis). The last 11 are tiny marker bones named like
+`left_wrist_marker`, 1.5 cm out from each branching point. Each lies on top
+of a helper bone and never moves on its own; it is only there so that
+Blender gives the branching point's bone a direction. You can hide the
+markers: click the figure, press Ctrl+Tab for Pose Mode, click a marker
+bone (Shift+click to add more), press H (Alt+H shows them again). Leave the
+helper bones visible: they are part of the figure. The short bones at the
+very ends of the skeleton (the toes, heels, fingertips and ears) run at most
+1 cm past their point, so a toe on the floor can dip a few millimetres under
+Blender's floor grid. All the bones
 move correctly: together they put every point exactly where it was
 measured. The body proportions are measured
 once over the whole clip and held constant, so the figure does not change

@@ -60,9 +60,10 @@ Conventions this writer uses
   not a delta from the offset (the offset is zero).
 * Every other joint has ``OFFSET`` = its rest-pose vector from its parent in
   file units, and the same three rotation channels. The file also has one
-  extra joint per child of every fork but one, ``<fork>_to_<child>``, with
-  ``OFFSET 0 0 0`` (see "Forks" below), so it holds more joints than the
-  caller's tree: 96 for the 71-node mocap tree.
+  extra joint per child of every fork, ``<fork>_to_<child>``, with ``OFFSET
+  0 0 0``, and one ``<fork>_marker`` leaf per fork whose channels are always
+  zero (see "Forks" below), so it holds more joints than the caller's tree:
+  71 + 36 + 11 = 118 for the 71-node mocap tree (11 forks with 36 children).
 * Every leaf gets an ``End Site``: a stub continuing the leaf's own bone for
   ``end_site_fraction`` of its length, at most ``end_site_max`` (1 cm), so
   readers that draw a bone from each joint to its child do not make a
@@ -128,28 +129,32 @@ off, and a torso sway with planted feet made the feet bob 3.2 cm in the file
 although they did not move at all in the input.
 
 So :func:`write_bvh` puts a joint ``<fork>_to_<child>`` between a fork and
-each of its children except one, the *main* child: the child that continues
-the fork's own bone most nearly straight on (the head at the neck, the
-middle finger at the wrist; for the root, the spine). A ``<fork>_to_<child>``
-joint sits on the fork (``OFFSET 0 0 0``) and has the one child, so it is a
-chain joint: its rotation turns that child's bone onto the child's measured
-direction. The fork's Kabsch fit looks through these joints to the real
-children, and is then turned by the small remaining swing that puts the main
-child exactly on its measured position. So every bone has its own rotation,
-the fork keeps its Kabsch orientation up to that small correction (none for
-a rigid motion, where every ``<fork>_to_<child>`` rotation is the identity
-too), and every joint lands exactly.
+each of its children. It sits on the fork (``OFFSET 0 0 0``) and has the one
+child, so it is a chain joint: its rotation turns that child's bone onto the
+child's measured direction, and every bone has its own rotation. The fork's
+Kabsch fit looks through these joints to the real children, so the fork keeps
+its orientation; for a rigid motion each such joint's local rotation is the
+identity.
 
-The main child is why the fork joint itself still has a real bone in readers
-that draw one from each joint towards its children: Blender's importer ends
-a joint's bone at the average of its children's heads, which for a fork is
-the fork plus the main child's offset divided by the number of children --
-a short bone pointing at the main child. (With a ``<fork>_to_<child>`` joint
-for every child that average was the fork itself, a zero-length bone, which
-Blender replaces with a copy of the parent bone: spikes of 30 to 50 cm out
-of the head, through the floor at the ankles and past the fingertips.)
-The 71-node mocap tree has 11 forks (the root among them) with 36 children,
-so the file has 71 + 36 - 11 = 96 joints.
+That alone leaves the fork's own bone with zero length in readers that draw
+a bone from each joint towards its children: Blender's importer ends a
+joint's bone at the average of its children's heads, and every child of a
+fork now sits on the fork. Blender replaces a zero-length bone with a copy of
+the parent bone, which drew spikes of 30 to 50 cm out of the head, through
+the floor at the ankles and past the fingertips. (Hanging one child on the
+fork directly instead gives the fork a real bone, but then that bone, ending
+at the average, covers only part of the link to that child: the forearm
+showed a third of its length and the head and hands floated free.) So each
+fork also gets a ``<fork>_marker`` leaf: ``marker_length`` (1.5 cm) along
+the rest direction of the fork's *main* child, the child that continues the
+fork's own bone most nearly straight on (the head at the neck, the middle
+finger at the wrist; for the root, the spine). Its channels are always zero,
+so it only turns with the fork. The average of the fork's children's heads
+is then a few millimetres from the fork along that direction: a short bone
+with the fork's orientation, every link drawn in full by the
+``<fork>_to_<child>`` bones, and the marker itself a 4 mm bone lying on the
+link to the main child. Joint positions are untouched: a marker is a leaf and
+plays no part in the solve.
 
 The file stores the local rotation ``L_j = G_p^T @ G_j`` (``L = G`` for the
 root) as ZXY Euler angles. With the fork joints above, every bone keeps its
@@ -286,17 +291,6 @@ def solve_frame(parents: Sequence[int], rest_offsets: np.ndarray, pos: np.ndarra
         if len(rest) >= 2 and np.linalg.matrix_rank(np.array(rest), tol=1e-6) >= 2:
             w = np.array(lengths)[:, None]
             G = kabsch(np.array(rest) * w, np.array(cur) * w)
-            # A fork whose main child hangs on it directly (write_bvh's layout,
-            # "Forks"): turn the fit by the little that is left so that child
-            # lands exactly; the other children have joints of their own.
-            direct = [c for c in children[j]
-                      if rest_offsets[c].any() or len(children[c]) != 1]
-            if len(direct) == 1:
-                m = direct[0]
-                a, b = rest_offsets[m], pos[m] - pos[j]
-                na, nb = np.linalg.norm(a), np.linalg.norm(b)
-                if na > 0.0 and nb > 0.0:
-                    G = swing(G @ (a / na), b / nb) @ G
         elif rest:
             G = swing(G_p @ rest[0], cur[0]) @ G_p
         else:
@@ -313,11 +307,11 @@ def _fmt(values) -> str:
 
 def _main_child(j: int, kids: list[list[int]], parents: Sequence[int],
                 rest_offsets: np.ndarray) -> int:
-    """The child of fork ``j`` that hangs on it directly in the file: the one
-    that continues ``j``'s own bone most nearly straight on (the middle
-    finger at the wrist, the head at the neck). The root has no bone of its
-    own, so it keeps the child with the most joints below it (the spine).
-    Ties go to the larger subtree, then the lower index."""
+    """The child of fork ``j`` whose rest direction the fork's marker joint
+    takes: the one that continues ``j``'s own bone most nearly straight on
+    (the middle finger at the wrist, the head at the neck). The root has no
+    bone of its own, so it takes the child with the most joints below it (the
+    spine). Ties go to the larger subtree, then the lower index."""
     def size(c: int) -> int:
         return 1 + sum(size(g) for g in kids[c])
 
@@ -331,7 +325,8 @@ def _main_child(j: int, kids: list[list[int]], parents: Sequence[int],
 
 def write_bvh(path, names: Sequence[str], parents: Sequence[int], rest_offsets: np.ndarray,
               positions: np.ndarray, fps: float, scale: float = 100.0,
-              end_site_fraction: float = 0.25, end_site_max: float = 0.01) -> None:
+              end_site_fraction: float = 0.25, end_site_max: float = 0.01,
+              marker_length: float = 0.015) -> None:
     """Write ``positions`` ``(N, J, 3)`` (metres) of the tree ``names`` /
     ``parents`` (exactly one ``parents[j] == -1``) as a BVH file at ``path``.
 
@@ -339,9 +334,11 @@ def write_bvh(path, names: Sequence[str], parents: Sequence[int], rest_offsets: 
     in metres (zero for the root); it becomes the joint's ``OFFSET`` after
     ``scale``. ``scale`` converts metres to file units (100 = centimetres).
     A leaf's ``End Site`` is ``end_site_fraction`` of its rest offset, at most
-    ``end_site_max`` metres long.
+    ``end_site_max`` metres long. ``marker_length`` (metres) is how far each
+    ``<fork>_marker`` joint sits from its fork.
     See the module docstring for the file layout, the rotation solve, and the
-    ``<fork>_to_<child>`` joints the file gets on top of ``names``.
+    ``<fork>_to_<child>`` and ``<fork>_marker`` joints the file gets on top of
+    ``names``.
     """
     names, parents = list(names), list(parents)
     rest_offsets = np.asarray(rest_offsets, dtype=np.float64)
@@ -353,16 +350,17 @@ def write_bvh(path, names: Sequence[str], parents: Sequence[int], rest_offsets: 
     if rest_offsets.shape != (J, 3) or positions.ndim != 3 or positions.shape[1:] != (J, 3):
         raise ValueError(f"rest_offsets {rest_offsets.shape} / positions {positions.shape} "
                          f"do not match {J} joints")
-    # A zero-offset joint between every fork and each of its children but the
-    # main one, so every bone gets its own rotation (module docstring, "Forks").
+    # A zero-offset joint between every fork and each of its children, so
+    # every bone gets its own rotation, and one marker joint per fork, so the
+    # fork's own bone has a direction (module docstring, "Forks").
     kids = [[c for c, p in enumerate(parents) if p == j] for j in range(J)]
+    markers: dict[int, np.ndarray] = {}   # fork -> marker OFFSET (metres)
     rest_list, pos_list = list(rest_offsets), list(positions.transpose(1, 0, 2))
     for j in range(J):
         if len(kids[j]) >= 2:
-            main = _main_child(j, kids, parents, rest_offsets)
+            main = rest_offsets[_main_child(j, kids, parents, rest_offsets)]
+            markers[j] = main / max(float(np.linalg.norm(main)), 1e-12) * marker_length
             for c in kids[j]:
-                if c == main:
-                    continue
                 names.append(f"{names[j]}_to_{names[c]}")
                 parents.append(j)
                 parents[c] = len(names) - 1
@@ -376,10 +374,20 @@ def write_bvh(path, names: Sequence[str], parents: Sequence[int], rest_offsets: 
             children[p].append(c)         # ascending index order
 
     lines = ["HIERARCHY"]
-    order: list[int] = []                 # depth-first, the order the channels appear in
+    order: list[int] = []                 # depth-first, parents first: the solve order
+    channel_order: list[int] = []         # the same, with -1 for each marker's channels
+
+    def leaf_end(tab: str, offset: np.ndarray) -> None:
+        stub = offset * end_site_fraction
+        stub *= min(1.0, end_site_max / max(float(np.linalg.norm(stub)), 1e-12))
+        lines.append(f"{tab}\tEnd Site")
+        lines.append(f"{tab}\t{{")
+        lines.append(f"{tab}\t\tOFFSET {_fmt(stub * scale)}")
+        lines.append(f"{tab}\t}}")
 
     def visit(j: int, depth: int) -> None:
         order.append(j)
+        channel_order.append(j)
         tab = "\t" * depth
         if j == root:
             lines.append(f"{tab}ROOT {names[j]}")
@@ -394,13 +402,16 @@ def write_bvh(path, names: Sequence[str], parents: Sequence[int], rest_offsets: 
             lines.append(f"{tab}\tCHANNELS 3 Zrotation Xrotation Yrotation")
         for c in children[j]:
             visit(c, depth + 1)
-        if not children[j]:
-            lines.append(f"{tab}\tEnd Site")
+        if j in markers:                  # a leaf that never moves of its own
+            lines.append(f"{tab}\tJOINT {names[j]}_marker")
             lines.append(f"{tab}\t{{")
-            stub = rest_offsets[j] * end_site_fraction
-            stub *= min(1.0, end_site_max / max(float(np.linalg.norm(stub)), 1e-12))
-            lines.append(f"{tab}\t\tOFFSET {_fmt(stub * scale)}")
+            lines.append(f"{tab}\t\tOFFSET {_fmt(markers[j] * scale)}")
+            lines.append(f"{tab}\t\tCHANNELS 3 Zrotation Xrotation Yrotation")
+            leaf_end(tab + "\t", markers[j])
             lines.append(f"{tab}\t}}")
+            channel_order.append(-1)
+        if not children[j]:
+            leaf_end(tab, rest_offsets[j])
         lines.append(f"{tab}}}")
 
     visit(root, 0)
@@ -409,8 +420,8 @@ def write_bvh(path, names: Sequence[str], parents: Sequence[int], rest_offsets: 
     for pos in positions:
         _, local = solve_frame(parents, rest_offsets, pos, order)
         values = list(pos[root] * scale)
-        for j in order:
-            values.extend(matrix_to_euler_zxy(local[j]))
+        for j in channel_order:
+            values.extend(matrix_to_euler_zxy(local[j]) if j >= 0 else (0.0, 0.0, 0.0))
         lines.append(_fmt(values))
     Path(path).write_text("\n".join(lines) + "\n")
 

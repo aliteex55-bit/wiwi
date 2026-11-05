@@ -311,34 +311,31 @@ cleaned skeleton animation per person and writes it to files.
   rotation cannot place children whose relative directions differ from the
   rest ones (a hand-written T-pose is not the subject's anatomy, and a head
   turn or a side bend moves fork children against each other), so
-  `write_bvh` hangs each fork's *main* child (the one continuing the fork's
-  own bone most nearly straight on; for the root, the spine) on the fork
-  directly and adds a zero-`OFFSET` joint `<fork>_to_<child>` for each other
-  child (11 forks, 36 children -> 25 such joints, so the file has 96 joints).
-  The fork's Kabsch fit looks through them and is then swung so the main
-  child lands exactly: every bone gets its own rotation and
-  length-normalised input round-trips exactly (before: 3.8 cm max with bones
-  10 deg off the rest directions, 6.1 cm on a 60 deg head turn, planted feet
-  bobbing 3.2 cm on a torso sway; after: 0.00000 cm). The main child is what
-  gives each fork a real bone in Blender, whose importer ends a joint's bone
-  at the mean of its children's heads: a short bone pointing at the main
-  child (measured in Blender 5.2.3: hips 16.6 cm up the spine, neck 5.0 cm
-  to the nose, nose 1.0 cm, shoulders 13-14 cm = half the upper arm, elbows
-  8-9 cm along the forearm, wrists 0.6-1.0 cm towards the middle finger,
-  ankles 5-6 cm). With a `<fork>_to_<child>` joint for every child (the
-  previous layout, 107 joints) that mean was the fork itself, a zero-length
-  bone, which Blender replaces with a copy of the parent bone: spikes 30-50
-  cm out of the head, through the floor at the ankles and past the
-  fingertips. The price: a fork with k children draws only 1/k of the way
-  to its main child and no bone draws the rest, so the figure has gaps in
-  Object Mode (hips to neck 33 cm undrawn, neck to nose 10 cm, half the
-  upper arm, two thirds of the forearm, ankle to small toe 12 cm); the
-  guide's Blender step 5 says so. Blender's importer would take the bone's
-  end from an `End Site` inside the fork (it reads that before averaging
-  the children), but an `End Site` in a joint with children is not standard
-  BVH and was not tried. The `<fork>_to_<child>` bones are the only drawn
-  pelvis, collarbones and heel and big-toe links, so the guide says to
-  leave them visible. The
+  `write_bvh` adds a zero-`OFFSET` joint `<fork>_to_<child>` between every
+  fork and each of its children (11 forks, 36 children -> 36 such joints).
+  The fork's Kabsch fit looks through them, so every bone gets its own
+  rotation and length-normalised input round-trips exactly (before: 3.8 cm
+  max with bones 10 deg off the rest directions, 6.1 cm on a 60 deg head
+  turn, planted feet bobbing 3.2 cm on a torso sway; after: 0.00000 cm).
+  Blender's importer ends a joint's bone at the mean of its children's
+  heads, and every child of a fork now sits on the fork, so the fork's own
+  bone would have zero length, which Blender replaces with a copy of the
+  parent bone: spikes 30-50 cm out of the head, through the floor at the
+  ankles and past the fingertips (the first layout, 107 joints). Hanging the
+  fork's main child on it directly gives the fork a real bone, but that bone,
+  ending at the mean, covers only 1/k of the link to that child (k
+  children) and no bone draws the rest: gaps of 33 cm from the hips to the
+  neck and two thirds of the forearm (the second layout, 96 joints). So each
+  fork also gets a `<fork>_marker` leaf, `marker_length` = 1.5 cm along the
+  rest direction of its main child (the child continuing the fork's own bone
+  most nearly straight on; for the root, the spine), with channels that are
+  always zero. The fork's bone then ends a few millimetres out along that
+  direction (measured in Blender 5.2.3: wrists 2.5 mm, nose 3.0 mm, hips,
+  neck, elbows and ankles 3.75 mm, shoulders 5.0 mm) and carries the fork's
+  orientation, every link of the tree is drawn whole by a `<fork>_to_<child>`
+  bone, and the marker is a 3.75 mm bone lying on the link to the main child.
+  Markers are leaves and play no part in the solve. 71 + 36 + 11 = 118
+  joints. The
   local rotation `G_parent^T @ G` is written as ZXY Euler degrees (`CHANNELS 3
   Zrotation Xrotation Yrotation`, the root also `Xposition Yposition
   Zposition`), offsets and positions x100 = centimetres, every leaf gets an
@@ -483,34 +480,31 @@ found.
   each - and exit code 0. The same clip followed by 30 black frames (the person leaves):
   `track 0: frames 0-29` and `num_frames` 60; before the pipeline fix the
   track ran to frame 59 with 30 confident "valid" frames of an empty crop.
-- The written BVH read back with `read_bvh()`: 96 joints (71 + 25
-  `<fork>_to_<child>`), 30 frames, frame time 0.0667 s (the clip is 15 fps),
+- The written BVH read back with `read_bvh()`: 118 joints (71 + 36
+  `<fork>_to_<child>` + 11 `<fork>_marker`), 30 frames, frame time 0.0667 s (the clip is 15 fps),
   and `fk()` reproduces every one of the 71 nodes of `joints_world` to
   0.00005 cm - also on the stand-in, whose fork children are nothing like a
   rotation of the rest pose (angle neck->nose / neck->left_shoulder 25 deg vs
   99 deg in the T-pose; 169 cm off before the fork joints). An independent
   parser with its own forward kinematics (`bvhio` 1.5.4) agrees to
-  0.00016 cm, and the 20tab `bvh` 0.3 parser reads the same 96 joints, in the
+  0.00009 cm, and the 20tab `bvh` 0.3 parser reads the same 118 joints, in the
   same order, with the same parents.
 - Blender 5.2.3 (`bpy` from PyPI: Blender as a Python module, the same BVH
   importer as the application, no window), every track imported with Scale
-  0.01 and Update Scene FPS on, the rest at the importer's defaults: 96 bones, the head of every bone
-  named after a node within 0.0002 cm of `joints_world` at every frame, no
-  bone shorter than 3.9 mm (the shortest, 3.96 mm, is the stand-in's right
-  thumb tip; the old layout had 1 mm stubs), the fork bones as in the
-  `bvh.py` bullet, `left_knee` running exactly from the knee to the ankle,
-  and the person facing the Front view (nose ahead of the neck towards the
-  viewer, the left shoulder on the viewer's right). With Update Scene
-  Duration ticked a 30-frame import left the scene at frames 1-250 (it only
-  lengthens). The guide's steps as now written (Update Scene Duration unticked, End typed
-  as 30 after the first import) leave End at 30 after the second import
-  (ticked, it became 31); the 26 leaf bones are 0.40-1.00 cm long (End
-  Sites capped at 1 cm) and the toe-tip bones end 0.3-0.6 cm lower than
-  their toe point (1.4-2.5 cm before the cap). In Object Mode the figure
-  has the gaps of the `bvh.py` bullet (hips to neck 33.3 cm, elbow to wrist
-  15.8-18.6 cm, shoulder to elbow 13-14 cm with no bone), and with the 25
-  `_to_` bones hidden 36 bones touch no other visible bone (thighs 10 cm
-  from the pelvis, heels 8-9 cm and toes 6 cm from the ankle). Two
+  0.01 and Update Scene FPS on, the rest at the importer's defaults: 118 bones, the head of every bone
+  named after a node within 0.00012 cm of `joints_world` at every frame,
+  the shortest bone 2.5 mm (a wrist; Blender only replaces bones under
+  1 mm), every link of the 71-node tree drawn as one whole bone (0 gaps), no
+  bone tail more than 2 cm outside the box around the 71 joints in any frame
+  (no spikes), `left_knee` running exactly from the knee to the ankle, and the
+  person facing the Front view (nose ahead of the neck towards the viewer,
+  the left shoulder on the viewer's right). With Update Scene Duration ticked
+  a 30-frame import left the scene at frames 1-250 (it only lengthens). The
+  guide's steps as now written (Update Scene Duration unticked, End typed as
+  30 after the first import) leave End at 30 after the second import
+  (ticked, it became 31); the 26 leaf bones are 0.40-1.00 cm long (End Sites
+  capped at 1 cm) and the toe-tip bones end 0.3-0.6 cm lower than their toe
+  point (1.4-2.5 cm before the cap). Two
   people, B first seen on video frame 8 with frame step 2, imported into one
   scene with the printed Start Frames 1 and 5 and End set to 10: B's action
   spans Blender frames 5-10 and both people match their own video frame at

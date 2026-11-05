@@ -12,9 +12,10 @@ from instanthmr.mocap_skeleton import (
 )
 
 SCALE = 100.0           # write_bvh default: metres -> centimetres
-#: The file has one ``<fork>_to_<child>`` joint per child of every fork but
-#: the fork's main child, which hangs on the fork directly.
-N_FORK_JOINTS = sum(len(c) - 1 for c in CHILDREN if len(c) >= 2)
+#: The file has one ``<fork>_to_<child>`` joint per child of every fork, and
+#: one ``<fork>_marker`` leaf per fork.
+N_FORK_JOINTS = sum(len(c) for c in CHILDREN if len(c) >= 2)
+N_MARKERS = sum(1 for c in CHILDREN if len(c) >= 2)
 
 
 def tree_positions(parsed: bvh.Bvh) -> np.ndarray:
@@ -160,19 +161,21 @@ def test_rigid_round_trip_real_tree(tmp_path):
     lines = text.splitlines()
     frame_lines = lines[lines.index("Frames: 20") + 2:]
     assert len(frame_lines) == 20
-    assert N_FORK_JOINTS == 25          # 71 tree nodes -> 96 joints in the file
-    assert all(len(line.split()) == 6 + 3 * (70 + N_FORK_JOINTS) for line in frame_lines)
+    assert (N_FORK_JOINTS, N_MARKERS) == (36, 11)   # 71 tree nodes -> 118 joints in the file
+    n_joints = 70 + N_FORK_JOINTS + N_MARKERS        # besides the root
+    assert all(len(line.split()) == 6 + 3 * n_joints for line in frame_lines)
     n_leaves = sum(1 for j in range(len(NODE_NAMES)) if j not in PARENTS)
-    assert n_leaves == 26 and text.count("End Site") == n_leaves
+    assert n_leaves == 26 and text.count("End Site") == n_leaves + N_MARKERS
 
     # read back: joints come in file order, so match them by name
     parsed = bvh.read_bvh(path)
     assert parsed.names[0] == "hips" and parsed.parents[0] == -1
     assert parsed.frame_time == pytest.approx(1 / 30)
-    assert parsed.motion.shape == (20, 6 + 3 * (70 + N_FORK_JOINTS))
+    assert parsed.motion.shape == (20, 6 + 3 * n_joints)
     fork_joints = [i for i, n in enumerate(parsed.names) if "_to_" in n]
-    assert len(fork_joints) == N_FORK_JOINTS
-    tree = [i for i in range(len(parsed.names)) if i not in fork_joints]
+    markers = [i for i, n in enumerate(parsed.names) if n.endswith("_marker")]
+    assert len(fork_joints) == N_FORK_JOINTS and len(markers) == N_MARKERS
+    tree = [i for i in range(len(parsed.names)) if i not in fork_joints and i not in markers]
     perm = [NODE_NAMES.index(parsed.names[i]) for i in tree]
     assert sorted(perm) == list(range(len(NODE_NAMES)))
     np.testing.assert_allclose(parsed.offsets[tree][1:], rest[perm][1:] * SCALE, atol=1e-6)
@@ -182,29 +185,45 @@ def test_rigid_round_trip_real_tree(tmp_path):
         fork, child = parsed.names[i].split("_to_")
         assert parsed.names[parsed.parents[i]] == fork
         assert [parsed.names[c] for c, p in enumerate(parsed.parents) if p == i] == [child]
-    # ... and every fork keeps exactly one child of its own, the main child
+    # ... and every fork's only other child is its marker, 1.5 cm out
     for j in range(len(parsed.names)):
         kids = [c for c, p in enumerate(parsed.parents) if p == j]
         if len(kids) >= 2:
-            assert sum(1 for c in kids if c not in fork_joints) == 1, parsed.names[j]
-    # No zero-length bones the way Blender's importer draws them: a joint's
-    # bone ends at the average of its children's rest heads (an End Site for
-    # a leaf). A zero-length one it replaces with a copy of the parent bone,
-    # which drew 30-50 cm spikes out of the head and through the floor.
+            assert [parsed.names[c] for c in kids if c not in fork_joints] == \
+                [parsed.names[j] + "_marker"]
+    for i in markers:
+        assert np.linalg.norm(parsed.offsets[i]) == pytest.approx(1.5, abs=1e-5)   # cm
+    # The figure the way Blender's importer draws it: a joint's bone runs from
+    # its rest head to the average of its children's rest heads (to its End
+    # Site for a leaf), and a zero-length one it replaces with a copy of the
+    # parent bone (that drew 30-50 cm spikes out of the head and through the
+    # floor). No bone may be zero-length, every link of the 71-node tree must
+    # be one whole bone (no gaps between the head and the body), and a fork's
+    # own bone must stay short.
     rest_head = np.zeros((len(parsed.names), 3))
     for i, p in enumerate(parsed.parents):
         if p >= 0:
             rest_head[i] = rest_head[p] + parsed.offsets[i]
+    tail = {}
     for j in range(len(parsed.names)):
         kids = [c for c, p in enumerate(parsed.parents) if p == j]
-        if kids:
-            tail = rest_head[kids].mean(axis=0)
-            assert np.linalg.norm(tail - rest_head[j]) > 0.1, parsed.names[j]   # cm
+        tail[j] = rest_head[kids].mean(axis=0) if kids else rest_head[j] + parsed.end_sites[j]
+        assert np.linalg.norm(tail[j] - rest_head[j]) > 0.1, parsed.names[j]       # cm
+        if len(kids) >= 2:
+            assert np.linalg.norm(tail[j] - rest_head[j]) < 1.0, parsed.names[j]
+    by_name = {n: i for i, n in enumerate(parsed.names)}
+    for c, p in enumerate(PARENTS):
+        if p < 0:
+            continue
+        a, b = rest_head[by_name[NODE_NAMES[p]]], rest_head[by_name[NODE_NAMES[c]]]
+        assert any(np.allclose(rest_head[j], a, atol=1e-6) and np.allclose(tail[j], b, atol=1e-6)
+                   for j in tail), f"no bone draws {NODE_NAMES[p]} -> {NODE_NAMES[c]}"
     err = np.linalg.norm(bvh.fk(parsed)[:, tree] - positions[:, perm] * SCALE, axis=-1)
     assert err.max() < 1e-3             # file units (cm), i.e. 0.01 mm
-    # rigid motion: the fork joints add no rotation of their own
+    # rigid motion: the fork joints add no rotation of their own; markers never do
     rot = parsed.motion[:, 6:].reshape(20, -1, 3)    # one (z, x, y) triple per joint, file order
     assert np.abs(rot[:, [i - 1 for i in fork_joints]]).max() < 1e-6
+    assert np.abs(rot[:, [i - 1 for i in markers]]).max() == 0.0
 
     # at a fork the Kabsch solve recovers the true orientation, twist included
     forks = [j for j in range(len(NODE_NAMES)) if PARENTS.count(j) >= 2]
