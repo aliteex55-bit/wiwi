@@ -64,8 +64,12 @@ Conventions this writer uses
   ``OFFSET 0 0 0`` (see "Forks" below), so it holds more joints than the
   caller's tree: 96 for the 71-node mocap tree.
 * Every leaf gets an ``End Site``: a stub continuing the leaf's own bone for
-  ``end_site_fraction`` of its length, so readers that draw a bone from each
-  joint to its child do not make a zero-length bone at the tips.
+  ``end_site_fraction`` of its length, at most ``end_site_max`` (1 cm), so
+  readers that draw a bone from each joint to its child do not make a
+  zero-length bone at the tips. The cap keeps the stubs short where the leaf's
+  bone is long: a quarter of the ankle-to-toe bone ran 4-5 cm past the toes,
+  down along the foot, and ended 1.4-2.5 cm lower than the toe, under the
+  floor whenever the toe stood on it.
 * Angles are in degrees, as the format requires. The channel order fixes how a
   reader composes them -- channels multiply in the listed order, so
   ``Zrotation Xrotation Yrotation`` builds ``R = Rz(z) @ Rx(x) @ Ry(y)`` --
@@ -327,13 +331,15 @@ def _main_child(j: int, kids: list[list[int]], parents: Sequence[int],
 
 def write_bvh(path, names: Sequence[str], parents: Sequence[int], rest_offsets: np.ndarray,
               positions: np.ndarray, fps: float, scale: float = 100.0,
-              end_site_fraction: float = 0.25) -> None:
+              end_site_fraction: float = 0.25, end_site_max: float = 0.01) -> None:
     """Write ``positions`` ``(N, J, 3)`` (metres) of the tree ``names`` /
     ``parents`` (exactly one ``parents[j] == -1``) as a BVH file at ``path``.
 
     ``rest_offsets[j]`` is the rest-pose vector from ``parents[j]`` to ``j``
     in metres (zero for the root); it becomes the joint's ``OFFSET`` after
     ``scale``. ``scale`` converts metres to file units (100 = centimetres).
+    A leaf's ``End Site`` is ``end_site_fraction`` of its rest offset, at most
+    ``end_site_max`` metres long.
     See the module docstring for the file layout, the rotation solve, and the
     ``<fork>_to_<child>`` joints the file gets on top of ``names``.
     """
@@ -391,7 +397,9 @@ def write_bvh(path, names: Sequence[str], parents: Sequence[int], rest_offsets: 
         if not children[j]:
             lines.append(f"{tab}\tEnd Site")
             lines.append(f"{tab}\t{{")
-            lines.append(f"{tab}\t\tOFFSET {_fmt(rest_offsets[j] * scale * end_site_fraction)}")
+            stub = rest_offsets[j] * end_site_fraction
+            stub *= min(1.0, end_site_max / max(float(np.linalg.norm(stub)), 1e-12))
+            lines.append(f"{tab}\t\tOFFSET {_fmt(stub * scale)}")
             lines.append(f"{tab}\t}}")
         lines.append(f"{tab}}}")
 

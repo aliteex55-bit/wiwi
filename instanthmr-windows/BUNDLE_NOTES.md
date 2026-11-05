@@ -248,9 +248,19 @@ cleaned skeleton animation per person and writes it to files.
   far-off point, made a level camera read as pitched 17 deg (3.9 deg with a
   second person standing nearer); with no such track the camera is assumed
   level, since a standing person's slope is noise; then one clip-wide 5th
-  percentile of the lowest foot keypoint over all tracks, subtracted so the
-  floor is y = 0;
-  a percentile so one bad frame cannot sink it) -> **foot anchoring** (a foot
+  percentile of the lowest foot keypoint, subtracted so the floor is y = 0;
+  a percentile so one bad frame cannot sink it; pitch and floor are measured
+  only on the tracks `looks_like_false_detection()` does not flag - mean
+  confidence under 0.7 or fewer frames than a quarter of the longest
+  confident track, the rule `report()` prints as `may be a false
+  detection`; the length is measured against a confident track only (against
+  the longest of all, a poster seen on 200 frames at 0.6 got a 0.92 person
+  seen on 45 flagged too, every track was, and the person stood 0.6 m above
+  the floor), and with no confident track only the length test is used (one
+  dim person at 0.65 was flagged as the only file there was), so it never
+  flags every track - and applied to all: on the stand-in clip
+  the false track's 30 of 60 frames sat 0.6 m lower and set the floor, and
+  the real person stood 0.60 m above y = 0) -> **foot anchoring** (a foot
   is "planted" when its speed is below 0.35 m/s and its height below 0.10 m,
   with hysteresis x1.5 and a 3-frame minimum, or `contact_prob > 0.5` when
   the graph has it; the speed is a central difference over +-1/15 s (+-2
@@ -271,7 +281,8 @@ cleaned skeleton animation per person and writes it to files.
   is the one that matters: `cam_trans` is a free 3-vector with little tying
   it to pixels (`smoothing.py`), so a standing person slides back and forth
   by centimetres, and a planted foot is the one thing known not to move.
-  `report()` prints the numbers (tracks, floor, root movement and
+  `report()` prints the numbers (tracks, floor and which tracks it was
+  measured on - `from track 0`, `from all tracks` -, root movement and
   planted-foot speed before -> after, `check_finger_order`); `export(prefix,
   formats)` writes `<prefix>.mocap.json`, `<prefix>.mocap.npz`,
   `<prefix>.track<id>.csv`, `<prefix>.track<id>.bvh`. The exported ids are
@@ -281,7 +292,11 @@ cleaned skeleton animation per person and writes it to files.
   `joints_world` can be related back to the camera: `to_world(joints_cam)`
   = `(joints_world - root_offset + [0, floor_y, 0]) @ R`, with `R =
   mocap._rotation_about_x(-radians(camera_pitch_deg))`, up to the
-  bone-length normalisation.
+  bone-length normalisation. Each JSON track also carries
+  `blender_start_frame` / `blender_end_frame` (`blender_frames()`:
+  `first_frame // frame_step + 1`, and that + N - 1): Blender's importer puts
+  frame 0 of every file on its Start Frame, so a person first seen later
+  needs a later Start Frame to play in step with the others.
 - `bvh.py` - `write_bvh(path, names, parents, rest_offsets, positions, fps,
   scale=100)`: positions in, rotations out, because a BVH file stores bone
   lengths once (`OFFSET`) and directions per frame as rotations. Per joint,
@@ -296,19 +311,42 @@ cleaned skeleton animation per person and writes it to files.
   rotation cannot place children whose relative directions differ from the
   rest ones (a hand-written T-pose is not the subject's anatomy, and a head
   turn or a side bend moves fork children against each other), so
-  `write_bvh` adds a zero-`OFFSET` joint `<fork>_to_<child>` per child of
-  every fork (36, so the file has 107 joints) and the fork's Kabsch fit looks
-  through them: every bone gets its own rotation and length-normalised input
-  round-trips exactly (before: 3.8 cm max with bones 10 deg off the rest
-  directions, 6.1 cm on a 60 deg head turn, planted feet bobbing 3.2 cm on a
-  torso sway; after: 0.00000 cm). Blender's importer lengthens the
-  zero-length bone each fork joint is left with (it continues its parent
-  bone). The
+  `write_bvh` hangs each fork's *main* child (the one continuing the fork's
+  own bone most nearly straight on; for the root, the spine) on the fork
+  directly and adds a zero-`OFFSET` joint `<fork>_to_<child>` for each other
+  child (11 forks, 36 children -> 25 such joints, so the file has 96 joints).
+  The fork's Kabsch fit looks through them and is then swung so the main
+  child lands exactly: every bone gets its own rotation and
+  length-normalised input round-trips exactly (before: 3.8 cm max with bones
+  10 deg off the rest directions, 6.1 cm on a 60 deg head turn, planted feet
+  bobbing 3.2 cm on a torso sway; after: 0.00000 cm). The main child is what
+  gives each fork a real bone in Blender, whose importer ends a joint's bone
+  at the mean of its children's heads: a short bone pointing at the main
+  child (measured in Blender 5.2.3: hips 16.6 cm up the spine, neck 5.0 cm
+  to the nose, nose 1.0 cm, shoulders 13-14 cm = half the upper arm, elbows
+  8-9 cm along the forearm, wrists 0.6-1.0 cm towards the middle finger,
+  ankles 5-6 cm). With a `<fork>_to_<child>` joint for every child (the
+  previous layout, 107 joints) that mean was the fork itself, a zero-length
+  bone, which Blender replaces with a copy of the parent bone: spikes 30-50
+  cm out of the head, through the floor at the ankles and past the
+  fingertips. The price: a fork with k children draws only 1/k of the way
+  to its main child and no bone draws the rest, so the figure has gaps in
+  Object Mode (hips to neck 33 cm undrawn, neck to nose 10 cm, half the
+  upper arm, two thirds of the forearm, ankle to small toe 12 cm); the
+  guide's Blender step 5 says so. Blender's importer would take the bone's
+  end from an `End Site` inside the fork (it reads that before averaging
+  the children), but an `End Site` in a joint with children is not standard
+  BVH and was not tried. The `<fork>_to_<child>` bones are the only drawn
+  pelvis, collarbones and heel and big-toe links, so the guide says to
+  leave them visible. The
   local rotation `G_parent^T @ G` is written as ZXY Euler degrees (`CHANNELS 3
   Zrotation Xrotation Yrotation`, the root also `Xposition Yposition
   Zposition`), offsets and positions x100 = centimetres, every leaf gets an
-  `End Site`. `read_bvh()` and `fk()` are the checking parser and forward
-  kinematics.
+  `End Site` continuing its bone for a quarter of its length, at most 1 cm
+  (`end_site_max`; a quarter of the ankle-to-toe bone ran 4-5 cm past the
+  toes and ended 1.4-2.5 cm lower than the toe, so a foot flat on the floor
+  poked through it). `read_bvh()` and `fk()` are the checking parser and
+  forward kinematics.
 
 ### demo.py and the .bat
 
@@ -319,7 +357,9 @@ the source's own path without its extension, which is what the .bat passes
 and does not collide with the files; an existing `PREFIX.*` .csv / .bvh /
 .json / .npz that cannot be opened for appending, i.e. one Excel has open,
 is rejected there too), `--export-formats
-json,npz,csv,bvh` (validated there too), `--no-footlock`, `--no-floor` (also
+json,npz,csv,bvh` (validated there too, each format kept once: `bvh,bvh`
+listed the .bvh files twice and ran out of tracks for their Blender frames),
+`--no-footlock`, `--no-floor` (also
 turns off the pitch levelling and the foot anchoring).
 `demo.MAX_GAP` (10) is passed both as the smoother's tracker `max_age` and as
 the recorder's `max_gap`, so every hole the tracker bridges is one the
@@ -330,7 +370,15 @@ person who leaves the picture ends their track instead of producing a
 confident-looking skeleton of an empty crop until the end of the clip.
 `build_recorder()` makes the `MocapRecorder`, `export_mocap()` runs
 finish / report / export and prints the paths under `motion capture
-written:`; it writes one format at a time and goes on after an `OSError`
+written:`, with `in Blender: Start Frame <s>, last frame <e>` under each
+.bvh (`blender_frames()`, zipped with the .bvh paths in track order) and once
+`set End at the bottom of Blender's timeline to <largest e>`: the importer's
+Update Scene Duration only lengthens the scene (`_update_scene_duration`,
+"Only extend the scene, never shorten it"), so a clip under 250 frames kept
+End = 250 and the figure stood still after it, and it sets End to Start
+Frame + frames, one past the last frame (a second import after End was typed
+as 30 made it 31), so the guide leaves it unticked and End is typed once; it
+writes one format at a time and goes on after an `OSError`
 (printed as `[error] could not write the .csv file(s): ...`, run exits 1), so
 a .csv locked by Excel no longer costs the .bvh written after it. Video: the
 recorder gets `fps / frame_skip` and `frame_step = frame_skip`, `emit()`
@@ -350,7 +398,8 @@ printed with its traceback, the export still runs, and the function then
 exits with code 1 (so the .bat reaches `:failed`): on a CPU a run takes 5-15x
 the clip's length and losing the capture is the worst outcome. Image: one
 frame pushed as `(0, 0.0)` with `min_frames=1` (a one-frame track: floor
-from that frame, nothing to anchor).
+from that frame, nothing to anchor; `report()` prints `one frame, nothing
+to steady` for it instead of `no foot was ever planted`).
 
 Track ids: `HMRPrediction.track_id` is a new field (default `None`).
 `TemporalSmoother._finalize` stamps the smoother's greedy-IoU id on every
@@ -377,17 +426,22 @@ frame, below the recorder's `min_frames=2`, so it used to end in "no person
 was tracked". Afterwards, if `%PREFIX%.track0.bvh` exists, it points to the
 `motion capture written:` list (in `OUTDIR`, captured before the `cd`;
 `dir /b` used to list the bundle folder for a relative argument, and stale
-files of earlier runs), prints the Blender import steps and opens the `.rrd`
+files of earlier runs), prints the Blender import steps (the first track
+the report does not mark, Scale, the printed Start Frame, Update Scene FPS
+with Update Scene Duration unticked, the printed End) and opens the `.rrd`
 in `.venv\Scripts\rerun.exe`; without it, `:no_person` says no person was
 found.
 
 ### Verified here (Linux, 4 CPUs, no GPU, no real weights)
 
-- `python -m pytest tests -q`: 60 passed (33 in `test_mocap.py`, 9 in
-  `test_bvh.py`, 5 in `test_smoothing.py`, 11 in `test_demo.py` with the
+- `python -m pytest tests -q`: 67 passed (39 in `test_mocap.py`, 9 in
+  `test_bvh.py`, 5 in `test_smoothing.py`, 12 in `test_demo.py` with the
   models and `cv2.VideoCapture` stubbed, 2 in `test_pipeline.py` with stub
   models), synthetic skeletons with known truth. Every round-2 code fix has a
-  test that fails on the code before it.
+  test that fails on the code before it, and so do the floor and pitch
+  measured without a false detection (a 6-frame 0.5-confidence blob 0.6 m
+  lower put the floor 0.6 m too low before; one walking 2 m in depth tilted
+  the clip 11.3 deg).
 - Review round 2, on the reviewer's simulations: BVH vs input with exact
   bone lengths, see the `bvh.py` bullet (0.00000 cm on every pose after the
   fix); pitch, two people standing with one to ten frames of person A 1.3x
@@ -416,26 +470,55 @@ found.
 - End to end: `demo.py --video` on a 30-frame 1280x497 clip of a real person
   with RF-DETR nano and a stand-in ONNX graph (real input/output names and
   shapes, constant outputs; `joints_3d` is `uniform(-0.6, 0.6)` noise) with
-  `--smoothing-filter --smoothing-mode centered --export`: 10.3 fps, `mocap: 2
+  `--smoothing-filter --smoothing-mode centered --export`: 6.3 fps, `mocap: 2
   track(s)` (the second: 15 real + 15 filled frames of a low-confidence
-  detection, now reported with `may be a false detection, not a person`),
-  `camera pitch not measured`, all six files written - `clip.mocap.json`
-  453,140 B, `clip.mocap.npz` 109,597 B, `clip.track0.csv` 60,219 B,
-  `clip.track1.csv` 58,096 B, `clip.track{0,1}.bvh` ~113,340 B each - and
-  exit code 0. The same clip followed by 30 black frames (the person leaves):
+  detection, reported with `may be a false detection, not a person`),
+  `floor: y = -0.895 m ..., from track 0` (the real person's lowest foot
+  point now has its 5th percentile at y = 0.000 m; measured on both tracks,
+  as before, the floor was -1.496 m and the person stood 0.601 m above it),
+  `camera pitch not measured`, `in Blender: Start Frame 1, last frame 30`
+  under both .bvh and `set End ... to 30`, all six files written -
+  `clip.mocap.json` 453,833 B, `clip.mocap.npz` 109,888 B, `clip.track0.csv`
+  60,222 B, `clip.track1.csv` 58,356 B, `clip.track{0,1}.bvh` ~101,415 B
+  each - and exit code 0. The same clip followed by 30 black frames (the person leaves):
   `track 0: frames 0-29` and `num_frames` 60; before the pipeline fix the
   track ran to frame 59 with 30 confident "valid" frames of an empty crop.
-- The written BVH read back with `read_bvh()`: 107 joints (71 + 36 fork
-  joints), 30 frames, frame time 0.0667 s (the clip is 15 fps), and `fk()`
-  reproduces every one of the 71 nodes of `joints_world` to 0.00005 cm -
-  also on the stand-in, whose fork children are nothing like a rotation of
-  the rest pose (angle neck->nose / neck->left_shoulder 25 deg vs 99 deg in
-  the T-pose; 169 cm off before the fork joints). An independent parser with
-  its own forward kinematics (`bvhio` 1.5.4) agrees to 0.00012 cm, and the
-  20tab `bvh` parser reads the same 107 joints and parents.
+- The written BVH read back with `read_bvh()`: 96 joints (71 + 25
+  `<fork>_to_<child>`), 30 frames, frame time 0.0667 s (the clip is 15 fps),
+  and `fk()` reproduces every one of the 71 nodes of `joints_world` to
+  0.00005 cm - also on the stand-in, whose fork children are nothing like a
+  rotation of the rest pose (angle neck->nose / neck->left_shoulder 25 deg vs
+  99 deg in the T-pose; 169 cm off before the fork joints). An independent
+  parser with its own forward kinematics (`bvhio` 1.5.4) agrees to
+  0.00016 cm, and the 20tab `bvh` 0.3 parser reads the same 96 joints, in the
+  same order, with the same parents.
+- Blender 5.2.3 (`bpy` from PyPI: Blender as a Python module, the same BVH
+  importer as the application, no window), every track imported with Scale
+  0.01 and Update Scene FPS on, the rest at the importer's defaults: 96 bones, the head of every bone
+  named after a node within 0.0002 cm of `joints_world` at every frame, no
+  bone shorter than 3.9 mm (the shortest, 3.96 mm, is the stand-in's right
+  thumb tip; the old layout had 1 mm stubs), the fork bones as in the
+  `bvh.py` bullet, `left_knee` running exactly from the knee to the ankle,
+  and the person facing the Front view (nose ahead of the neck towards the
+  viewer, the left shoulder on the viewer's right). With Update Scene
+  Duration ticked a 30-frame import left the scene at frames 1-250 (it only
+  lengthens). The guide's steps as now written (Update Scene Duration unticked, End typed
+  as 30 after the first import) leave End at 30 after the second import
+  (ticked, it became 31); the 26 leaf bones are 0.40-1.00 cm long (End
+  Sites capped at 1 cm) and the toe-tip bones end 0.3-0.6 cm lower than
+  their toe point (1.4-2.5 cm before the cap). In Object Mode the figure
+  has the gaps of the `bvh.py` bullet (hips to neck 33.3 cm, elbow to wrist
+  15.8-18.6 cm, shoulder to elbow 13-14 cm with no bone), and with the 25
+  `_to_` bones hidden 36 bones touch no other visible bone (thighs 10 cm
+  from the pelvis, heels 8-9 cm and toes 6 cm from the ankle). Two
+  people, B first seen on video frame 8 with frame step 2, imported into one
+  scene with the printed Start Frames 1 and 5 and End set to 10: B's action
+  spans Blender frames 5-10 and both people match their own video frame at
+  every Blender frame to 0.00002 cm.
 - `demo.py --image` on a single frame with `export_mocap.bat`'s flags and a
-  folder of the photo's name beside it: two one-frame tracks, all six files,
-  exit code 0.
+  folder of the photo's name beside it: two one-frame tracks, floor `from
+  track 0`, `one frame, nothing to steady` for both tracks, all six files,
+  `Start Frame 1, last frame 1` under both .bvh, exit code 0.
 - `demo.py --help` lists the four flags; `--export-formats json,xyz` exits
   with `unknown format(s) xyz; choose among json, npz, csv, bvh` before any
   model loads.
@@ -450,13 +533,14 @@ found.
   `finger chains NOT ordered as expected` with the per-finger wrist distances
   when it fails. If it fails on a real clip the hand entries of
   `mocap_skeleton._BONES` and `FINGER_CHAINS` must be reversed.
-- Blender import on a real PC: the file passes our parser and the 20tab `bvh`
-  PyPI parser (same joints, offsets, parents, channel lists and values), the
-  Blender axis statement in `GUIDE_WINDOWS.md` (file +Z = Blender -Y with the
-  importer's default `-Z forward, Y up`) is from the importer's documented
-  defaults, not from a run; so is the statement that it gives each
-  zero-length fork bone its parent bone's vector (`import_bvh.py`'s
-  zero-length-bone branch).
+- Blender's window: the import ran through `bpy` 5.2.3 on Linux, so the
+  labels the guide tells the user to click (Scale, Start Frame, Update Scene
+  FPS / Duration, the timeline's End field) were read from Blender 5.2's own
+  UI scripts, not clicked; Blender 4.x was not run at all.
+- Unreal, or any program other than Blender, reading the BVH.
+- The guide's Excel steps for the `.csv` (no Excel here), in particular
+  whether **Data > From Text/CSV** follows the **Use system separators**
+  setting on a PC that writes decimals with a comma.
 - `export_mocap.bat` on Windows (no cmd.exe here).
 
 ### Limitations
@@ -477,6 +561,11 @@ found.
   of a pitched camera keeps the pitch (harmless there: the floor height is
   right at that depth).
 - At most `--max-persons` (2) tracks per frame.
+- Which tracks the floor and pitch are measured on is a heuristic
+  (confidence and length): a real person seen for under a quarter of the
+  longest confident track is left out, a confident, long-lived false
+  detection takes part, and so does a long-lived low-confidence one when no
+  track is confident (it is then not flagged either).
 
 ## Why the weights are not in the bundle
 
@@ -485,6 +574,17 @@ found.
 download it on the user's PC. Everything else the install needs (PyPI,
 download.pytorch.org, storage.googleapis.com for RF-DETR, github.com for the
 MHR assets) is reachable from a normal PC.
+
+## Dependency versions (resolved here)
+
+The Windows dependency set (`torch==2.8.0`, `torchvision==0.23.0`,
+`onnxruntime-gpu==1.26.0`, `rfdetr>=1.8`, `rerun-sdk>=0.21`, `numpy>=1.24`,
+`opencv-python>=4.8`, `pillow>=10`) resolves for Python 3.12 and 3.11 on
+win_amd64 (`uv pip compile --python-platform x86_64-pc-windows-msvc`) to
+rfdetr 1.11.2, transformers 5.22.1, onnxruntime-gpu 1.26.0, rerun-sdk 0.42.0,
+numpy 2.5.4 (3.12) / 2.4.6 (3.11), opencv-python 5.0.0.93 and pillow 13.0.0.
+That is resolution only, against PyPI: the CUDA wheels themselves (torch
+`+cu128` / `+cu126` from download.pytorch.org) could not be downloaded here.
 
 ## Not verified here
 

@@ -294,6 +294,11 @@ def test_chain_only_tree(tmp_path):
     assert parsed.names == names and parsed.parents == parents
     assert [len(c) for c in parsed.channels] == [6, 3, 3, 3]
     assert list(parsed.end_sites) == [3]
-    np.testing.assert_allclose(parsed.end_sites[3], rest[3] * SCALE * 0.25, atol=1e-6)
+    # a quarter of the 30 cm bone would be 7.5 cm: capped at 1 cm, same direction
+    np.testing.assert_allclose(parsed.end_sites[3], [1.0, 0.0, 0.0], atol=1e-6)
+    bvh.write_bvh(path, names, parents, rest * 0.1, positions * 0.1, fps=60.0)
+    # a 3 cm bone keeps its quarter, 0.75 cm
+    np.testing.assert_allclose(bvh.read_bvh(path).end_sites[3], rest[3] * 0.1 * SCALE * 0.25,
+                               atol=1e-6)
     err = np.linalg.norm(bvh.fk(parsed) - positions * SCALE, axis=-1)
     assert err.max() < 1e-3

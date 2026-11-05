@@ -47,14 +47,14 @@ set "STRIDE=2"
 if "%DEVICE%"=="cuda" set "STRIDE=1"
 if "%DETECTOR%"=="medium" set "STRIDE=1"
 
-echo Motion capture of video: "%INPUT%"
+echo Motion capture of the video or photo: "%INPUT%"
 echo   When it is finished these files are next to the video:
-echo     "%PREFIX%.track0.bvh"   the animation, for Blender (track1 = a second person)
+echo     "%PREFIX%.track0.bvh"   the animation, for Blender (one file per person: track0, track1, ...)
 echo     "%PREFIX%.track0.csv"   joint positions per frame, as a spreadsheet
 echo     "%PREFIX%.mocap.json"   everything, for programmers (also .mocap.npz)
 echo     "%RRD%"   the recording for the Rerun viewer
 echo     (the .rrd is large: about 5 GB per minute of Full-HD video - delete it if you only need the .bvh)
-echo   (a track1 file is a second person or a false detection - the report says which)
+echo   (a track - even track0 - can be a false detection, not a person; the report marks it)
 echo   (the video must be in a normal folder on this PC - a phone, camera or
 echo    network location is read-only and nothing can be written there)
 echo   device=%DEVICE%  detector=%DETECTOR%  smoothing=centered  detector-stride=%STRIDE%  %MHR%
@@ -78,10 +78,13 @@ if not exist "%PREFIX%.track0.bvh" goto :no_person
 echo.
 echo Done. The new files are listed above under "motion capture written:" (in "%OUTDIR%").
 echo.
-echo To use the animation in Blender (4.x): File ^> Import ^> Motion Capture (.bvh), choose the
-echo .track0.bvh file. In the panel on the right set Scale to 0.01 (centimetres to metres) and tick
-echo "Update Scene FPS" and "Update Scene Duration" (otherwise it plays slow and stops at frame 250),
-echo click Import BVH, then press Space to play. See GUIDE_WINDOWS.md, section "Motion capture files".
+echo To use the animation in Blender (4 or 5): File ^> Import ^> Motion Capture (.bvh), choose the
+echo .track0.bvh file (or, if the report marks track 0 as a false detection, the first track it
+echo does not mark). In the panel on the right set Scale to 0.01 (centimetres to metres), set
+echo Start Frame to the number printed above under that file, tick "Update Scene FPS" (leave
+echo "Update Scene Duration" unticked), and click Import BVH. Then set End at the bottom of the
+echo timeline to the number printed above, and press Space to play. See GUIDE_WINDOWS.md,
+echo section "Motion capture files".
 echo.
 echo Opening the recording in the Rerun viewer now. Close the viewer, then press any key to end this window.
 ".venv\Scripts\rerun.exe" "%RRD%"
@@ -96,7 +99,7 @@ exit /b 0
 
 :no_person
 echo.
-echo ***** No person was found in the video - no animation was written (see the report above). *****
+echo ***** No person was found in the video or photo - no animation was written (see the report above). *****
 echo See GUIDE_WINDOWS.md, section "Troubleshooting".
 pause
 exit /b 1

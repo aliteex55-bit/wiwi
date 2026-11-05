@@ -253,34 +253,49 @@ detector is bigger, and it runs twice as often.
 `run_video.bat` and `record_video.bat` only show the result. To get the
 motion as files you can use in Blender or another 3D program, drag the video
 onto **`export_mocap.bat`** instead. It processes the clip like
-`record_video.bat` (no viewer until the end; with a graphics card it is
-somewhat slower, because the person detector runs on every frame; on the
-processor it takes 5 to 15 times the clip's length), then turns the per-frame
-skeletons into one steady animation per person and writes these files next
-to the video. A photo works too: drag it onto `export_mocap.bat` the same way
-and you get a one-frame pose. For `C:\clips\dance.mp4`:
+`record_video.bat`: no viewer opens until the end. Then it turns the
+per-frame skeletons into one steady animation per person and writes these
+files next to the video. With a graphics card it is somewhat slower than
+`record_video.bat`, because the person detector (the part that finds the
+people in each picture) runs on every frame instead of every 2nd. Without a
+graphics card it takes 5 to 15 times the clip's length. A photo works too:
+drag it onto `export_mocap.bat` the same way and you get a one-frame pose.
+For `C:\clips\dance.mp4`:
 
 - `dance.track0.bvh` - the animation, for Blender and most other 3D tools
-  (BVH is the standard motion-capture text format). One file per person:
-  `track0` is the first person found, a second person gets `track1`. An
-  extra track can also be a false detection (a coat on a hook, a reflection):
-  the report, see below, marks a track that is short or low in confidence
-  with `may be a false detection` - ignore its files.
+  (BVH is the standard motion-capture text format). One file per person,
+  numbered in the order they first appear in the video: `track0`, `track1`,
+  and so on. A track can also be a false detection: the program took a coat
+  on a hook or a reflection for a person. It gets a number like a person
+  does, so even `track0` can be one. The report, see below, marks a track
+  that is short or low in confidence with `may be a false detection`. Use
+  the first track it does not mark; the marked ones are usually not a
+  person, and you can ignore their files. The report never marks every
+  track, so there is always one to use.
 - `dance.track0.csv` - the same animation as a spreadsheet: one row per
   video frame, with the x / y / z position of every joint in metres (values
   separated by commas, decimals with a point). On a PC set to Swedish (or
   another language that writes decimals with a comma), double-clicking it
-  puts each whole row in column A. Instead open Excel, choose **Data > From
-  Text/CSV**, pick the file and set **Delimiter** to **Comma**; if the numbers
-  still show as text, first untick **File > Options > Advanced > Use system
-  separators** and set the decimal separator to a point. Close the file in
-  Excel before you run `export_mocap.bat` on the same video again: Windows
-  does not let the program overwrite a file Excel has open.
+  puts each whole row in column A. Open it like this instead:
+  1. Open Excel and choose **Data > From Text/CSV**, then pick the file.
+  2. Set **Delimiter** to **Comma** and click **Load**. A good result is one
+     value per column (`frame`, `time`, `valid`, `confidence`, `nose_x`, ...)
+     with the numbers right-aligned in their cells.
+  3. If the numbers are left-aligned instead (Excel read them as text), close
+     the workbook without saving. Choose **File > Options > Advanced**,
+     untick **Use system separators**, type a point (`.`) as **Decimal
+     separator**, click **OK**, and do steps 1 and 2 again. (To go back to
+     decimal commas later, tick **Use system separators** again.)
+
+  Close the file in Excel before you run `export_mocap.bat` on the same video
+  again: Windows does not let the program overwrite a file Excel has open.
 - `dance.mocap.json` and `dance.mocap.npz` - everything (all persons, the raw
   and the cleaned-up positions, the model's own parameters), for programmers.
-- `dance.rrd` - the viewer recording, like the one `record_video.bat` makes
-  (with the export's steadier smoothing). The viewer opens with it when the
-  script is finished. The `.rrd` is large: about 5 GB per minute of Full-HD
+- `dance.rrd` - the viewer recording, like the one `record_video.bat` makes,
+  except that the export smooths each frame together with the few frames
+  before and after it, which is steadier than the smoothing `run_video.bat`
+  and `record_video.bat` use. The viewer opens with it when the script is
+  finished. The `.rrd` is large: about 5 GB per minute of Full-HD
   video (1920x1080, 30 frames per second), twice that at 60. The drive the
   video is on needs that much free space; otherwise the run goes on to the
   end and then stops with `No space left on device` and writes no `.bvh`. If
@@ -299,7 +314,7 @@ the clip processed so far. At the end it prints a short report, for example:
 ```
 mocap: 1 track(s)
   track 0: frames 0-899, 900 samples, 3 filled in, mean confidence 0.91
-floor: y = -0.812 m before levelling (now y = 0); camera pitched 8.0 deg down, floor levelled
+floor: y = -0.812 m before levelling (now y = 0), from track 0; camera pitched 8.0 deg down, floor levelled
 foot anchoring: root movement per frame (real motion counts too), speed of planted feet
   track 0: root 6.3 -> 2.1 mm/frame (67% less); planted feet 0.141 -> 0.009 m/s (a foot is planted on 72% of foot-frames)
 finger chains ordered as expected
@@ -309,6 +324,8 @@ motion capture written:
   C:\clips\dance.mocap.npz
   C:\clips\dance.track0.csv
   C:\clips\dance.track0.bvh
+      in Blender: Start Frame 1, last frame 900
+  set End at the bottom of Blender's timeline to 900
 ```
 
 After `writing files ...` it can take a little while (about 10 seconds per
@@ -323,37 +340,81 @@ found and the skeleton was filled in from the frames around it. `camera
 pitched ... down, floor levelled` means the camera was looking down a little
 and the program straightened the floor; `camera pitch not measured` means the
 person did not move far enough towards or away from the camera to tell (one
-metre is needed), and the camera is taken to be level. `root ... mm/frame`
-is how much the body moved from one frame to
-the next, before and after the feet were used to steady it; `planted feet` is
-how fast a foot that stands on the floor was still moving - after the
-clean-up it should be close to 0. A line `finger chains NOT ordered as
-expected` means the hand points came out in an order the program did not
-expect: the body is fine, only the fingers in the files may be wrong - tell
-the developer. Then `motion capture written:` lists the files and the viewer
+metre is needed), and the camera is taken to be level. `from track 0` says
+whose feet the floor and the camera's tilt were measured on: a track marked
+`may be a false detection` is left out, so it cannot lift or sink the real
+person; `from all tracks` means no track was marked, so all were used. The
+root is the centre of the body, between the hips: `root ... mm/frame` is how
+much it moved from one frame to the next, before and after the feet were
+used to steady it; `planted feet` is how fast a foot that stands on the
+floor was still moving - after the clean-up it should be close to 0. For a
+photo there is only one frame, so each track's foot line says `one frame,
+nothing to steady` and the camera pitch is always `not measured`; that is
+expected. A line `finger chains NOT ordered as expected` means the hand
+points came out in an order the program did not expect: the body is fine,
+only the fingers in the files may be wrong - tell the developer. Then `motion capture written:` lists the files, with the two
+frame numbers Blender needs under each `.bvh` (see below), and the viewer
 opens.
 
-**Opening the animation in Blender** (version 4.x, free from
-https://www.blender.org): **File > Import > Motion Capture (.bvh)**, choose
-the `.track0.bvh` file. In the panel on the right of the file window set
-**Scale** to `0.01` (the file is in centimetres and Blender works in metres;
-the scale only changes the size, never the motion), and in the **Animation**
-part of the same panel tick **Update Scene FPS** and **Update Scene
-Duration** (otherwise Blender keeps its own 24 frames per second and
-250-frame timeline: a 30 fps clip then plays in slow motion and stops after 8
-seconds), then click **Import BVH**. A stick figure appears. Press **Space** to play it and drag the time
-slider at the bottom to scrub. The floor is at height 0, and the person faces
-the +Z direction of the file (towards the camera that filmed them), which with
-Blender's default import settings puts them facing you in the Front view
-(numpad 1).
+**Opening the animation in Blender** (Blender 4 or 5, checked with Blender
+5.2; free from https://www.blender.org):
 
-**What to expect.** The skeleton has 70 points: body, face, both hands with
-all fingers, and the feet. In Blender it has more bones than that: the
-upper arm, for example, is the bone `left_shoulder_to_left_elbow`, and at the
-pelvis, neck, head, shoulders, elbows, wrists and ankles there is one extra
-bone that just continues the bone before it, straight on (past the wrist
-into the hand, for example). They are what lets every joint land exactly
-where it was measured; leave them be. The body proportions are measured
+1. Choose **File > Import > Motion Capture (.bvh)** and pick the
+   `.track0.bvh` file (or, if the report marks track 0 as `may be a false
+   detection`, the first track it does not mark).
+2. In the panel on the right of the file window set **Scale** to `0.01` (the
+   file is in centimetres and Blender works in metres; the scale only changes
+   the size, never the motion).
+3. In the **Animation** part of the same panel set **Start Frame** to the
+   number printed under this file (`in Blender: Start Frame 1, ...`). Set it
+   even when there is only one person: the End number in step 6 counts from
+   it. A person who walked into the picture later starts later in Blender,
+   in step with the video, and until then stands still in their first pose.
+4. In the same part tick **Update Scene FPS** (otherwise Blender keeps its
+   own 24 frames per second, and a 30 fps clip plays in slow motion). Leave
+   **Update Scene Duration** unticked: step 6 sets the length by hand, and
+   with the tick an import can make the timeline one frame too long.
+5. Click **Import BVH**. A stick figure appears, drawn in pieces: the bones
+   that start at the hips, the neck, the shoulders, the elbows and the
+   ankles reach only part of the way (a third to a half) to the next point.
+   So the spine, the neck, the arms and the feet have gaps, and the head and
+   the hands seem to float a little apart from the body. That is how Blender
+   draws this file: where the skeleton branches, Blender ends the bone part
+   of the way. Every point is still in the right place and moves correctly.
+6. At the bottom of the Blender window, at the right end of the timeline,
+   set **End** to the number in the line `set End at the bottom of Blender's
+   timeline to ...` (double-click the **End** field, type the number, press
+   Enter). Blender's timeline is 250 frames long until you change it: a
+   shorter clip would end and the figure then stand still until frame 250,
+   and a longer one would stop at frame 250.
+
+For a second person do steps 1 to 5 again with their own `.bvh` file
+(usually `.track1.bvh`) and its own Start Frame; End stays as you set it.
+Press **Space** to play and drag the time slider at the
+bottom to scrub. The floor is at height 0, and the person faces you in
+Blender's Front view (press 1 on the numeric keypad, or choose **View >
+Viewpoint > Front**), the way they faced the camera that filmed them.
+
+**What to expect.** The skeleton has 71 points: the 70 the model finds
+(body, face, both hands with all fingers, and the feet) plus `hips`, a point
+in the middle between the two hips that carries the body's position. In
+Blender that makes 96 bones. 71 are named after a point and start at it:
+`left_knee`, for example, is the shin, from the knee down to the ankle. The
+other 25 are helper bones. Each starts at a point where the skeleton
+branches (a wrist, an ankle, a shoulder, an elbow, the neck, the nose or the
+hips) and carries one branch: `left_wrist_to_left_thumb_third_joint`, for
+example, runs from the wrist into the thumb. The bone of a branching point
+itself points at its main branch, the one that carries straight on (from
+the shoulder that is the elbow), but stops part of the way, which makes the
+gaps described in step 5: `left_shoulder`, for example, goes half way to
+the elbow. The helper bones are part of the figure - `hips_to_left_hip` is
+the left half of the pelvis, `neck_to_left_shoulder` the left collarbone -
+so leave them be: hidden, the legs, the shoulders and the heels would float
+loose. The short bones at the very ends of the skeleton (the toes, heels,
+fingertips and ears) run at most 1 cm past their point, so a toe on the
+floor can dip a few millimetres under Blender's floor grid. All the bones
+move correctly: together they put every point exactly where it was
+measured. The body proportions are measured
 once over the whole clip and held constant, so the figure does not change
 size from frame to frame. The feet are used to steady the body: a foot that stands on the
 floor is held in place on the floor, which removes most of the back-and-forth
@@ -526,8 +587,9 @@ antivirus exceptions and run setup again.
 person, roughly upright, not too small in the frame. Only the 2 most confident
 people are processed per frame.
 
-**`No person was found in the video` at the end of `export_mocap.bat`, and
-`mocap: no person was tracked for 2 frame(s) or more` in the report** -
+**`No person was found in the video or photo` at the end of
+`export_mocap.bat`, and `mocap: no person was tracked for 2 frame(s) or more`
+(`1 frame(s)` for a photo) in the report** -
 `motion capture written:` lists only the `.mocap.json` and `.mocap.npz`
 files, without tracks; there was no animation to write, so no `.bvh` or
 `.csv`. See "Nothing is detected in the picture".

@@ -46,11 +46,17 @@ steps on each person, in this order:
    the lowest foot keypoint against depth gives the camera's pitch and the
    whole world is rotated back level; with less depth the slope is noise, and
    the camera is assumed level.
-   Then one floor height for the whole clip: the 5th percentile, over all
-   tracks and valid frames, of the lowest foot keypoint. A percentile rather
-   than the minimum so that one bad frame cannot sink the floor. Subtracting
-   it makes "standing on the ground" mean y = 0, which is what the next step
-   and every animation tool assume.
+   Then one floor height for the whole clip: the 5th percentile, over the
+   valid frames, of the lowest foot keypoint. A percentile rather than the
+   minimum so that one bad frame cannot sink the floor. Subtracting it makes
+   "standing on the ground" mean y = 0, which is what the next step and every
+   animation tool assume.
+   Both the pitch and the floor are measured only on the tracks that
+   :func:`looks_like_false_detection` does not flag (it never flags every
+   track): a false detection -- a coat on a hook, a reflection --
+   has a made-up skeleton at a made-up height, and counted in it would lift
+   or sink the real person. The levelling and the floor height are then
+   applied to every track.
 
 5. **Anchor the root with the feet** (:func:`anchor_root`). This is the step
    that makes the result usable. ``cam_trans`` -- the model's estimate of where
@@ -217,13 +223,49 @@ def estimate_floor(
     percentile: float = 5.0,
 ) -> float:
     """Floor height (world y) for a clip: the ``percentile``-th percentile, over
-    all tracks and valid frames, of the lowest foot keypoint. 0.0 when there is
-    no valid frame at all."""
+    the valid frames of the tracks given, of the lowest foot keypoint. 0.0
+    when there is no valid frame at all."""
     foot_nodes = list(FOOT_NODES["left"]) + list(FOOT_NODES["right"])
     lows = [np.asarray(j)[np.asarray(v)][:, foot_nodes, 1].min(axis=-1)
             for j, v in zip(joints_world_list, valid_list)]
     lows = np.concatenate(lows) if lows else np.zeros(0)
     return float(np.percentile(lows, percentile)) if lows.size else 0.0
+
+
+def looks_like_false_detection(confidences: Sequence[np.ndarray]) -> list[bool]:
+    """For each track, given its ``(N,)`` per-frame confidences: True when it
+    may be a detector false positive rather than a person -- a mean confidence
+    below 0.7, or fewer frames than a quarter of the longest track that passes
+    that confidence test. A false positive is typically brief and
+    half-hearted; a person is neither.
+
+    The length is measured against a confident track only, so a long-lived,
+    half-hearted false detection (a poster, a TV) cannot get a confident
+    person who is in the picture for a short while flagged too. When no track
+    passes the confidence test (one dim or distant person, say), confidence
+    cannot tell the tracks apart and only the length test is used. So the
+    longest track that passes it, or the longest of all, is never flagged."""
+    low = [float(np.mean(c)) < 0.7 for c in confidences]
+    if all(low):
+        low = [False] * len(low)
+    longest = max((len(c) for c, lo in zip(confidences, low) if not lo), default=0)
+    return [lo or len(c) < 0.25 * longest for c, lo in zip(confidences, low)]
+
+
+def blender_frames(frames: np.ndarray, frame_step: int) -> tuple[int, int]:
+    """``(start, last)``: the Blender frames a track's BVH plays on when it is
+    imported with Start Frame = ``start``.
+
+    Blender's BVH importer puts the file's first frame on its Start Frame (1
+    unless changed), whichever video frame the person first appeared on, so
+    a person who walks in later would play out of step with the others. The
+    BVH holds one frame per processed video frame from the track's first
+    one, so the start that keeps every track of a clip in step is the
+    track's first processed frame plus 1 -- ``frames[0] // frame_step + 1``
+    -- and the last frame is that plus the number of frames minus 1.
+    """
+    start = int(frames[0]) // int(frame_step) + 1
+    return start, start + len(frames) - 1
 
 
 def _lowest_foot_points(joints_world: np.ndarray, valid: np.ndarray) -> np.ndarray:
@@ -456,11 +498,14 @@ def write_json(path: str | Path, tracks: Sequence[TrackData], meta: dict) -> Non
                 "shape_params": _rounded(t.shape_params[i]),
                 "contact": _rounded(t.contact[i]) if t.contact is not None else None,
             })
+        start, last = blender_frames(t.frames, meta["frame_step"])
         doc["tracks"].append({
             "id": int(t.track_id),
             "first_frame": int(t.frames[0]),
             "last_frame": int(t.frames[-1]),
             "num_frames": int(len(t.frames)),
+            "blender_start_frame": start,
+            "blender_end_frame": last,
             "num_filled": int((~t.valid).sum()),
             "bone_lengths": _rounded(t.bone_lengths),
             "frames": frames,
@@ -545,6 +590,7 @@ class MocapRecorder:
         self.min_frames = int(min_frames)
         self.floor_y = 0.0
         self.camera_pitch_deg = 0.0   # positive: the camera looked down
+        self._floor_tracks: list[int] = []   # exported ids of the tracks it was measured on
         self._tracker = None
         self._tracks: dict[int, dict[str, list]] = {}
         self._last_frame = -1
@@ -649,15 +695,20 @@ class MocapRecorder:
             working.append((track_id, samples, valid, arrays, joints_cam, joints_world, lengths))
 
         if self.floor:
-            valids = [w[2] for w in working]
-            pitch = estimate_pitch([w[5] for w in working], valids)
+            # Measured on the tracks the report does not flag (see the module
+            # docstring, step 4); the index in `working` is the exported id.
+            flagged = looks_like_false_detection([w[3]["confidence"] for w in working])
+            self._floor_tracks = [i for i, f in enumerate(flagged) if not f]
+            used = [working[i] for i in self._floor_tracks]
+            valids = [w[2] for w in used]
+            pitch = estimate_pitch([w[5] for w in used], valids)
             self.camera_pitch_deg = float(np.degrees(pitch))
             if pitch:
                 # Undo the pitch: rotate the world back up by the same angle.
                 level = _rotation_about_x(-pitch)
                 for w in working:
                     w[5][:] = w[5] @ level.T
-            self.floor_y = estimate_floor([w[5] for w in working], valids)
+            self.floor_y = estimate_floor([w[5] for w in used], valids)
             for w in working:
                 w[5][..., 1] -= self.floor_y
 
@@ -703,18 +754,20 @@ class MocapRecorder:
         lines = [f"mocap: {len(tracks)} track(s)"
                  + (f", {self._dropped} dropped (fewer than {self.min_frames} frames)"
                     if self._dropped else "")]
-        longest = max(len(t.frames) for t in tracks)
-        for t in tracks:
+        flagged = looks_like_false_detection([t.confidence for t in tracks])
+        for t, doubtful in zip(tracks, flagged):
             line = (f"  track {t.track_id}: frames {t.frames[0]}-{t.frames[-1]}, "
                     f"{len(t.frames)} samples, {int((~t.valid).sum())} filled in, "
                     f"mean confidence {float(t.confidence.mean()):.2f}")
-            # A detector false positive is typically brief and half-hearted; a
-            # person is neither, so the user is told which files to doubt.
-            if float(t.confidence.mean()) < 0.7 or len(t.frames) < 0.25 * longest:
+            # The user is told which files to doubt.
+            if doubtful:
                 line += " - short or low confidence: may be a false detection, not a person"
             lines.append(line)
         if self.floor:
-            line = f"floor: y = {self.floor_y:+.3f} m before levelling (now y = 0)"
+            ids = self._floor_tracks
+            source = ("all tracks" if len(ids) == len(tracks) > 1 else
+                      ("track " if len(ids) == 1 else "tracks ") + ", ".join(map(str, ids)))
+            line = f"floor: y = {self.floor_y:+.3f} m before levelling (now y = 0), from {source}"
             if self.camera_pitch_deg:
                 line += (f"; camera pitched {abs(self.camera_pitch_deg):.1f} deg "
                          f"{'down' if self.camera_pitch_deg > 0 else 'up'}, floor levelled")
@@ -729,6 +782,9 @@ class MocapRecorder:
             lines.append("foot anchoring: root movement per frame (real motion counts too), "
                          "speed of planted feet")
             for t in tracks:
+                if len(t.frames) == 1:          # a photo: nothing moves
+                    lines.append(f"  track {t.track_id}: one frame, nothing to steady")
+                    continue
                 after = t.joints_world.astype(np.float64)
                 before = after - t.root_offset[:, None, :].astype(np.float64)
                 planted = planted_feet(before, self.fps, t.contact)[1:]

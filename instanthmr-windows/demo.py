@@ -67,6 +67,7 @@ import cv2
 import numpy as np
 
 from instanthmr import MocapRecorder, PosePipeline, onnx_output_names
+from instanthmr.mocap import blender_frames
 from instanthmr.mhr_renderer import DEFAULT_MHR_SCRIPT
 from instanthmr.reference import ReferenceTrack, resolve_reference
 from instanthmr.smoothing import TemporalSmoother
@@ -264,7 +265,9 @@ def parse_args() -> argparse.Namespace:
 
     args = p.parse_args()
     # Checked here, before any model loads, so a typo costs a second, not a minute.
-    args.export_formats = [f.strip() for f in args.export_formats.split(",") if f.strip()]
+    # Each format once: "bvh,bvh" would write and list the .bvh files twice.
+    args.export_formats = list(dict.fromkeys(
+        f.strip() for f in args.export_formats.split(",") if f.strip()))
     unknown = [f for f in args.export_formats if f not in EXPORT_FORMATS]
     if unknown:
         p.error(f"--export-formats: unknown format(s) {', '.join(unknown)}; "
@@ -548,10 +551,21 @@ def export_mocap(recorder: MocapRecorder, args: argparse.Namespace) -> bool:
                   "        full, free some space. Then run again.", flush=True)
             ok = False
     print("motion capture written:")
+    # Blender plays every imported BVH from its Start Frame; these keep a
+    # person who appears later in step with the others. export() writes the
+    # .bvh files in track order.
+    ranges = iter([blender_frames(t.frames, recorder.frame_step) for t in recorder.finish()])
+    last = 0
     for path in paths:
         print(f"  {path}")
+        if path.suffix == ".bvh":
+            start, end = next(ranges)
+            last = max(last, end)
+            print(f"      in Blender: Start Frame {start}, last frame {end}")
     if not paths:
         print("  (none)")
+    if last:
+        print(f"  set End at the bottom of Blender's timeline to {last}")
     return ok
 
 

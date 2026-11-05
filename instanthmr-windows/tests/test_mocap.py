@@ -16,8 +16,8 @@ import pytest
 
 from instanthmr.inference import HMRPrediction
 from instanthmr.mocap import (
-    MocapRecorder, _rotation_about_x, anchor_root, estimate_floor, estimate_pitch,
-    fill_gaps, normalise_bone_lengths, planted_feet, to_world,
+    MocapRecorder, _rotation_about_x, anchor_root, blender_frames, estimate_floor,
+    estimate_pitch, fill_gaps, normalise_bone_lengths, planted_feet, to_world,
 )
 from instanthmr.mocap_skeleton import (
     CAM_TO_WORLD, FOOT_NODES, NODE_NAMES, NUM_NODES, PARENTS, REST_DIRECTIONS, ROOT,
@@ -642,6 +642,15 @@ def test_report_no_tracks():
     assert "floor" not in text and "finger" not in text
 
 
+def test_report_of_a_photo_says_there_is_nothing_to_steady():
+    # demo.py --image pushes one frame with min_frames=1; "no foot was ever
+    # planted" read like a failure.
+    rec = MocapRecorder(fps=30.0, min_frames=1)
+    rec.push(0, 0.0, [make_prediction(standing_skeleton(), [100, 100, 200, 400])])
+    text = rec.report()
+    assert "  track 0: one frame, nothing to steady" in text and "ever planted" not in text, text
+
+
 def test_report_flags_short_low_confidence_track():
     rec = two_person_recorder(n=40, missing=())
     blob = standing_skeleton() + [0, 0, -3]
@@ -650,6 +659,123 @@ def test_report_flags_short_low_confidence_track():
     lines = rec.report().splitlines()
     flagged = [ln for ln in lines if "may be a false detection" in ln]
     assert len(flagged) == 1 and flagged[0].startswith("  track 1:"), lines
+
+
+def person_and_blob(person_conf=0.9, blob_conf=0.5, n_person=40, n_blob=6,
+                    blob_drop=0.6, blob_walk=0.0) -> MocapRecorder:
+    """A person standing 3 m from the camera on a floor 1.3 m below it for
+    ``n_person`` frames, and from frame 10 a blob (a coat, a reflection) for
+    ``n_blob`` frames, ``blob_drop`` metres lower, walking ``blob_walk``
+    metres towards the camera while it sinks by a fifth of that -- what a
+    camera pitched down 11 degrees would see. No foot anchoring, so the
+    heights are the floor step's alone."""
+    rec = MocapRecorder(fps=25.0, footlock=False)
+    person = standing_skeleton() + [0.0, -1.3, -3.0]
+    for i in range(n_person):
+        persons = [make_prediction(person, [100, 100, 200, 400], confidence=person_conf, track_id=0)]
+        k = i - 10
+        if 0 <= k < n_blob:
+            step = blob_walk * k / max(n_blob - 1, 1)
+            blob = standing_skeleton() + [1.0, -1.3 - blob_drop - 0.2 * step, -4.0 + step]
+            persons.append(make_prediction(blob, [1000, 50, 1050, 150], confidence=blob_conf,
+                                           track_id=1))
+        rec.push(i, i / 25.0, persons)
+    return rec
+
+
+def test_floor_ignores_a_false_detection():
+    # Counted in, the blob's 6 of 46 frames are more than 5% of the lowest
+    # foot points, so the 5th percentile was the blob's floor and the person
+    # floated 0.6 m above y = 0 (the stand-in clip did exactly that).
+    rec = person_and_blob()
+    person, blob = rec.finish()
+    assert rec.floor_y == pytest.approx(-1.3, abs=0.01)
+    low = person.joints_world[:, FOOT_LIST, 1].min(axis=1)
+    assert np.abs(low).max() < 0.01
+    assert blob.joints_world[:, FOOT_LIST, 1].min() == pytest.approx(-0.6, abs=0.01)
+    text = rec.report()
+    assert "y = -1.300 m before levelling (now y = 0), from track 0;" in text, text
+    assert "track 1: frames 10-15" in text and "may be a false detection" in text
+
+
+def test_camera_pitch_ignores_a_false_detection():
+    # The blob covers 2 m of depth on a slope, the person none: counted in,
+    # the blob alone passed the 1 m depth gate and tilted the whole clip.
+    rec = person_and_blob(blob_walk=2.0)
+    rec.finish()
+    assert rec.camera_pitch_deg == 0.0 and rec.floor_y == pytest.approx(-1.3, abs=0.01)
+    # The same walk as a confident track of 20 frames is trusted, and tilts it.
+    trusted = person_and_blob(blob_conf=0.9, n_blob=20, blob_walk=2.0)
+    trusted.finish()
+    assert trusted.camera_pitch_deg == pytest.approx(np.degrees(np.arctan(0.2)), abs=0.1)
+
+
+def test_no_track_is_flagged_for_low_confidence_when_none_is_confident():
+    # Both tracks low in confidence: confidence cannot tell them apart, so
+    # only the length test is used; both are long, so the floor is measured
+    # on all of them, as before.
+    rec = person_and_blob(person_conf=0.5, n_blob=30)
+    person, blob = rec.finish()
+    expected = estimate_floor([to_world(t.joints_cam) for t in (person, blob)],
+                              [t.valid for t in (person, blob)])
+    assert rec.floor_y == pytest.approx(expected, abs=1e-6)
+    assert rec.floor_y == pytest.approx(-1.9, abs=0.01)
+    text = rec.report()
+    assert "from all tracks;" in text and "false detection" not in text, text
+    # A short one is still flagged, and left out.
+    short = person_and_blob(person_conf=0.5, n_blob=6)
+    short.finish()
+    text = short.report()
+    assert short.floor_y == pytest.approx(-1.3, abs=0.01) and "from track 0;" in text
+    assert "track 1: frames 10-15" in text and "may be a false detection" in text
+    # One dim person alone (0.65, the detector keeps anyone above 0.5) is the
+    # only file there is: it was flagged, and the guide said to ignore it.
+    single = person_and_blob(person_conf=0.65, n_blob=0)
+    single.finish()
+    text = single.report()
+    assert single.floor_y == pytest.approx(-1.3, abs=0.01) and "from track 0;" in text
+    assert "false detection" not in text, text
+
+
+def test_a_long_half_hearted_false_detection_does_not_flag_a_short_confident_person():
+    # A poster seen on all 200 frames at confidence 0.6, its made-up feet
+    # 0.6 m lower, and a person on frames 100-144 (under a quarter of 200)
+    # at 0.92. Measured against the poster's length the person was flagged
+    # too, every track was, the floor came from both and the person stood
+    # 0.6 m above it. The length is measured against confident tracks only.
+    rec = MocapRecorder(fps=25.0, footlock=False)
+    for i in range(200):
+        poster = standing_skeleton() + [1.0, -1.9, -4.0]
+        persons = [make_prediction(poster, [1000, 50, 1050, 150], confidence=0.6, track_id=0)]
+        if 100 <= i < 145:
+            person = standing_skeleton() + [0.0, -1.3, -3.0]
+            persons.append(make_prediction(person, [100, 100, 200, 400], confidence=0.92,
+                                           track_id=1))
+        rec.push(i, i / 25.0, persons)
+    poster, person = rec.finish()
+    assert rec.floor_y == pytest.approx(-1.3, abs=0.01)
+    assert np.abs(person.joints_world[:, FOOT_LIST, 1].min(axis=1)).max() < 0.01
+    flagged = [ln for ln in rec.report().splitlines() if "may be a false detection" in ln]
+    assert len(flagged) == 1 and flagged[0].startswith("  track 0:"), flagged
+    assert "from track 1;" in rec.report()
+
+
+def test_blender_frames_keep_a_late_person_in_step(tmp_path):
+    # A 25 fps video read with --frame-skip 2: frames 0, 2, ... 18 are
+    # processed, and they are Blender frames 1-10. Person B walks in on video
+    # frame 8, the 5th processed frame, so B's BVH must start on frame 5.
+    rec = MocapRecorder(fps=12.5, frame_step=2)
+    a, b = standing_skeleton(), standing_skeleton() + [1.5, 0.0, 0.0]
+    for i in range(10):
+        persons = [make_prediction(a, [100, 100, 200, 400], track_id=0)]
+        if i >= 4:
+            persons.append(make_prediction(b, [600, 100, 700, 400], track_id=1))
+        rec.push(2 * i, 2 * i / 25.0, persons)
+    doc = json.loads(rec.export(tmp_path / "duo", ("json",))[0].read_text())
+    got = [(t["first_frame"], t["blender_start_frame"], t["blender_end_frame"])
+           for t in doc["tracks"]]
+    assert got == [(0, 1, 10), (8, 5, 10)]
+    assert blender_frames(np.array([3, 4, 5]), 1) == (4, 6)       # a camera: frame_step 1
 
 
 def test_recorder_drops_short_tracks_and_reports():

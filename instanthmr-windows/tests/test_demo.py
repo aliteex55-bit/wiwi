@@ -167,6 +167,43 @@ def test_a_csv_open_in_excel_costs_only_the_csv(monkeypatch, capsys, tmp_path):
     assert "could not write the .csv file(s)" in out and "dance.track0.csv" in out
 
 
+class LatePersonPipeline(StubPipeline):
+    """Person A on every processed frame; person B from the 3rd one on."""
+
+    def predict(self, rgb):
+        result = super().predict(rgb)
+        if self.calls >= 3:
+            result.persons.append(make_prediction(standing_skeleton() + [1.5, 0.0, 0.0],
+                                                  [400, 100, 500, 400]))
+        return result
+
+
+def test_export_prints_the_blender_frames_of_every_bvh(monkeypatch, capsys, tmp_path):
+    # Video frames 0, 2, 4, 6 are processed (--frame-skip 2): Blender frames
+    # 1-4. Person B first appears on video frame 4, Blender frame 3.
+    video = tmp_path / "duo.mp4"
+    video.touch()
+    stub_models(monkeypatch, LatePersonPipeline(), n_frames=8)
+    # bvh twice: a repeated format is written and listed once (listed twice,
+    # the .bvh paths outnumbered the tracks and the run ended in StopIteration).
+    args = parse(monkeypatch, "--video", str(video), "--export", str(tmp_path / "duo"),
+                 "--export-formats", "json,bvh,bvh", "--frame-skip", "2")
+    assert args.export_formats == ["json", "bvh"]
+    demo.run_video(args)
+    out = capsys.readouterr().out
+    listing = out[out.index("motion capture written:"):].splitlines()
+    assert listing[1:7] == [
+        f"  {tmp_path / 'duo.mocap.json'}",
+        f"  {tmp_path / 'duo.track0.bvh'}",
+        "      in Blender: Start Frame 1, last frame 4",
+        f"  {tmp_path / 'duo.track1.bvh'}",
+        "      in Blender: Start Frame 3, last frame 4",
+        "  set End at the bottom of Blender's timeline to 4",
+    ], out
+    doc = json.loads((tmp_path / "duo.mocap.json").read_text())
+    assert [(t["blender_start_frame"], t["blender_end_frame"]) for t in doc["tracks"]] == [(1, 4), (3, 4)]
+
+
 def test_run_camera_time_stamps_start_at_zero(monkeypatch, tmp_path):
     stub_models(monkeypatch, StubPipeline(), n_frames=5)
     args = parse(monkeypatch, "--camera", "0", "--export", str(tmp_path / "cam"),
