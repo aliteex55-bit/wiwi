@@ -60,9 +60,9 @@ Conventions this writer uses
   not a delta from the offset (the offset is zero).
 * Every other joint has ``OFFSET`` = its rest-pose vector from its parent in
   file units, and the same three rotation channels. The file also has one
-  extra joint per child of every fork, ``<fork>_to_<child>``, with ``OFFSET
-  0 0 0`` (see "Forks" below), so it holds more joints than the caller's
-  tree: 107 for the 71-node mocap tree.
+  extra joint per child of every fork but one, ``<fork>_to_<child>``, with
+  ``OFFSET 0 0 0`` (see "Forks" below), so it holds more joints than the
+  caller's tree: 96 for the 71-node mocap tree.
 * Every leaf gets an ``End Site``: a stub continuing the leaf's own bone for
   ``end_site_fraction`` of its length, so readers that draw a bone from each
   joint to its child do not make a zero-length bone at the tips.
@@ -124,14 +124,28 @@ off, and a torso sway with planted feet made the feet bob 3.2 cm in the file
 although they did not move at all in the input.
 
 So :func:`write_bvh` puts a joint ``<fork>_to_<child>`` between a fork and
-each of its children. It sits on the fork (``OFFSET 0 0 0``) and has the one
-child, so it is a chain joint: its rotation turns that child's bone onto the
-child's measured direction, and every bone has its own rotation. The fork's
-Kabsch fit looks through these joints to the real children, so the fork keeps
-its orientation; for a rigid motion each such joint's local rotation is the
-identity. The cost is a zero-length bone at each fork joint itself, which
-Blender's importer replaces with a copy of the parent bone's vector, so in
-Blender it continues the bone before it.
+each of its children except one, the *main* child: the child that continues
+the fork's own bone most nearly straight on (the head at the neck, the
+middle finger at the wrist; for the root, the spine). A ``<fork>_to_<child>``
+joint sits on the fork (``OFFSET 0 0 0``) and has the one child, so it is a
+chain joint: its rotation turns that child's bone onto the child's measured
+direction. The fork's Kabsch fit looks through these joints to the real
+children, and is then turned by the small remaining swing that puts the main
+child exactly on its measured position. So every bone has its own rotation,
+the fork keeps its Kabsch orientation up to that small correction (none for
+a rigid motion, where every ``<fork>_to_<child>`` rotation is the identity
+too), and every joint lands exactly.
+
+The main child is why the fork joint itself still has a real bone in readers
+that draw one from each joint towards its children: Blender's importer ends
+a joint's bone at the average of its children's heads, which for a fork is
+the fork plus the main child's offset divided by the number of children --
+a short bone pointing at the main child. (With a ``<fork>_to_<child>`` joint
+for every child that average was the fork itself, a zero-length bone, which
+Blender replaces with a copy of the parent bone: spikes of 30 to 50 cm out
+of the head, through the floor at the ankles and past the fingertips.)
+The 71-node mocap tree has 11 forks (the root among them) with 36 children,
+so the file has 71 + 36 - 11 = 96 joints.
 
 The file stores the local rotation ``L_j = G_p^T @ G_j`` (``L = G`` for the
 root) as ZXY Euler angles. With the fork joints above, every bone keeps its
@@ -268,6 +282,17 @@ def solve_frame(parents: Sequence[int], rest_offsets: np.ndarray, pos: np.ndarra
         if len(rest) >= 2 and np.linalg.matrix_rank(np.array(rest), tol=1e-6) >= 2:
             w = np.array(lengths)[:, None]
             G = kabsch(np.array(rest) * w, np.array(cur) * w)
+            # A fork whose main child hangs on it directly (write_bvh's layout,
+            # "Forks"): turn the fit by the little that is left so that child
+            # lands exactly; the other children have joints of their own.
+            direct = [c for c in children[j]
+                      if rest_offsets[c].any() or len(children[c]) != 1]
+            if len(direct) == 1:
+                m = direct[0]
+                a, b = rest_offsets[m], pos[m] - pos[j]
+                na, nb = np.linalg.norm(a), np.linalg.norm(b)
+                if na > 0.0 and nb > 0.0:
+                    G = swing(G @ (a / na), b / nb) @ G
         elif rest:
             G = swing(G_p @ rest[0], cur[0]) @ G_p
         else:
@@ -280,6 +305,24 @@ def solve_frame(parents: Sequence[int], rest_offsets: np.ndarray, pos: np.ndarra
 def _fmt(values) -> str:
     # ``+ 0.0`` turns -0.0 into 0.0 so the file never says "-0.000000".
     return " ".join(f"{float(v) + 0.0:.6f}" for v in values)
+
+
+def _main_child(j: int, kids: list[list[int]], parents: Sequence[int],
+                rest_offsets: np.ndarray) -> int:
+    """The child of fork ``j`` that hangs on it directly in the file: the one
+    that continues ``j``'s own bone most nearly straight on (the middle
+    finger at the wrist, the head at the neck). The root has no bone of its
+    own, so it keeps the child with the most joints below it (the spine).
+    Ties go to the larger subtree, then the lower index."""
+    def size(c: int) -> int:
+        return 1 + sum(size(g) for g in kids[c])
+
+    def unit(v: np.ndarray) -> np.ndarray:
+        n = np.linalg.norm(v)
+        return v / n if n > 0.0 else v
+
+    own = unit(rest_offsets[j]) if parents[j] >= 0 else np.zeros(3)
+    return max(kids[j], key=lambda c: (round(float(unit(rest_offsets[c]) @ own), 6), size(c), -c))
 
 
 def write_bvh(path, names: Sequence[str], parents: Sequence[int], rest_offsets: np.ndarray,
@@ -304,13 +347,16 @@ def write_bvh(path, names: Sequence[str], parents: Sequence[int], rest_offsets: 
     if rest_offsets.shape != (J, 3) or positions.ndim != 3 or positions.shape[1:] != (J, 3):
         raise ValueError(f"rest_offsets {rest_offsets.shape} / positions {positions.shape} "
                          f"do not match {J} joints")
-    # A zero-offset joint between every fork and each of its children, so
-    # every bone gets its own rotation (module docstring, "Forks").
+    # A zero-offset joint between every fork and each of its children but the
+    # main one, so every bone gets its own rotation (module docstring, "Forks").
     kids = [[c for c, p in enumerate(parents) if p == j] for j in range(J)]
     rest_list, pos_list = list(rest_offsets), list(positions.transpose(1, 0, 2))
     for j in range(J):
         if len(kids[j]) >= 2:
+            main = _main_child(j, kids, parents, rest_offsets)
             for c in kids[j]:
+                if c == main:
+                    continue
                 names.append(f"{names[j]}_to_{names[c]}")
                 parents.append(j)
                 parents[c] = len(names) - 1

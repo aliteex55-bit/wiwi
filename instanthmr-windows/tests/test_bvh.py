@@ -12,8 +12,9 @@ from instanthmr.mocap_skeleton import (
 )
 
 SCALE = 100.0           # write_bvh default: metres -> centimetres
-#: The file has one ``<fork>_to_<child>`` joint per child of every fork.
-N_FORK_JOINTS = sum(len(c) for c in CHILDREN if len(c) >= 2)
+#: The file has one ``<fork>_to_<child>`` joint per child of every fork but
+#: the fork's main child, which hangs on the fork directly.
+N_FORK_JOINTS = sum(len(c) - 1 for c in CHILDREN if len(c) >= 2)
 
 
 def tree_positions(parsed: bvh.Bvh) -> np.ndarray:
@@ -159,7 +160,7 @@ def test_rigid_round_trip_real_tree(tmp_path):
     lines = text.splitlines()
     frame_lines = lines[lines.index("Frames: 20") + 2:]
     assert len(frame_lines) == 20
-    assert N_FORK_JOINTS == 36          # 71 tree nodes -> 107 joints in the file
+    assert N_FORK_JOINTS == 25          # 71 tree nodes -> 96 joints in the file
     assert all(len(line.split()) == 6 + 3 * (70 + N_FORK_JOINTS) for line in frame_lines)
     n_leaves = sum(1 for j in range(len(NODE_NAMES)) if j not in PARENTS)
     assert n_leaves == 26 and text.count("End Site") == n_leaves
@@ -181,6 +182,24 @@ def test_rigid_round_trip_real_tree(tmp_path):
         fork, child = parsed.names[i].split("_to_")
         assert parsed.names[parsed.parents[i]] == fork
         assert [parsed.names[c] for c, p in enumerate(parsed.parents) if p == i] == [child]
+    # ... and every fork keeps exactly one child of its own, the main child
+    for j in range(len(parsed.names)):
+        kids = [c for c, p in enumerate(parsed.parents) if p == j]
+        if len(kids) >= 2:
+            assert sum(1 for c in kids if c not in fork_joints) == 1, parsed.names[j]
+    # No zero-length bones the way Blender's importer draws them: a joint's
+    # bone ends at the average of its children's rest heads (an End Site for
+    # a leaf). A zero-length one it replaces with a copy of the parent bone,
+    # which drew 30-50 cm spikes out of the head and through the floor.
+    rest_head = np.zeros((len(parsed.names), 3))
+    for i, p in enumerate(parsed.parents):
+        if p >= 0:
+            rest_head[i] = rest_head[p] + parsed.offsets[i]
+    for j in range(len(parsed.names)):
+        kids = [c for c, p in enumerate(parsed.parents) if p == j]
+        if kids:
+            tail = rest_head[kids].mean(axis=0)
+            assert np.linalg.norm(tail - rest_head[j]) > 0.1, parsed.names[j]   # cm
     err = np.linalg.norm(bvh.fk(parsed)[:, tree] - positions[:, perm] * SCALE, axis=-1)
     assert err.max() < 1e-3             # file units (cm), i.e. 0.01 mm
     # rigid motion: the fork joints add no rotation of their own
